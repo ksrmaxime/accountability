@@ -28,7 +28,7 @@ def main() -> None:
     sources = ["NZZO", "NNTA", "NNHEU", "ZWSO", "TPS", "NZZ", "TA", "ZWAO", "TPSO", "HEU", "ZWAS", "NZZS", "ZWAI"]
 
     query_name = f"BuerokratieVerwaltung_{datetime.now():%Y%m%d_%H%M%S}"
-    comment = "THESIS pipeline: query -> clean -> article lead extraction"
+    comment = "Accountability pipeline: query -> clean -> criticism/source/content-type/response classification"
     expiration_date = "2026-12-31"
 
     out_paths = run_pipeline(

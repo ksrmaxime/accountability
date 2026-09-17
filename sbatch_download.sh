@@ -1,11 +1,11 @@
 #!/bin/bash -l
-#SBATCH --job-name=thesis_download
+#SBATCH --job-name=accountability_download
 #SBATCH --partition=cpu
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=logs/swissdox_%j.out
-#SBATCH --error=logs/swissdox_%j.err
+#SBATCH --output=logs/download_%j.out
+#SBATCH --error=logs/download_%j.err
 #SBATCH --mail-user=maxime.kaiser@unil.ch
 #SBATCH --mail-type=END,FAIL
 
