@@ -27,12 +27,16 @@ python-dotenv==1.2.1
 tqdm==4.67.1
 
 # ── LLM / Transformers ────────────────────────────────────────────────────────
-torch==2.9.1
-transformers==4.57.3
+# Versions pinned to what vllm actually resolves to on curnagl (a wheel-based
+# install of vllm alone, with no pre-existing torch pin, then everything else
+# on top). Pinning torch==2.9.1 ahead of vllm forced pip to fall back to old
+# vllm sdists with no prebuilt wheel for this platform/CUDA combo.
+torch==2.13.0
+transformers==5.17.0
 accelerate==1.12.0
-safetensors==0.7.0
-tokenizers==0.22.1
-vllm
+safetensors==0.8.0
+tokenizers==0.23.2
+vllm==0.29.0
 
 # ── Dev tools ─────────────────────────────────────────────────────────────────
 pytest==9.0.2
