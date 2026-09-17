@@ -35,7 +35,7 @@ export TMPDIR="/scratch/mkaiser3/tmp_${SLURM_JOB_ID}"
 mkdir -p "${TMPDIR}"
 
 python scripts/download.py \
-  --start 2000-01-01 \
+  --start 2025-01-01 \
   --end   2025-12-31 \
   --max-results 1000000 \
   --outdir data/input
