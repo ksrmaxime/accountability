@@ -13,7 +13,12 @@ This runs independently of step 4a/4b: every row with keyword_answer ==
 is making the criticism. Rows step 3 did not confirm as criticism are left
 untouched — `content_type` stays NA for those.
 
-Output column: content_type -> "Policy" | "Entity" | NA
+The category definitions are unchanged; the model now gives a one-sentence
+justification before the POLICY/ENTITY label, same justification-first
+pattern as every other step.
+
+Output columns: content_type -> "Policy" | "Entity" | NA
+                content_type_justification -> free text | NA
 
 Usage
 -----
@@ -22,7 +27,7 @@ Usage
       --output_base data/output/step5 \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 5 --max_input_tokens 16384
+      --max_new_tokens 80 --max_input_tokens 16384
 """
 from __future__ import annotations
 
@@ -44,14 +49,35 @@ from src.step5_config import build_mask
 
 
 def parse_output(raw: str) -> dict:
+    """Parse "<justification sentence>\n...\nPOLICY|ENTITY" (justification
+    first, label last — see src/step5_prompts.py). Falls back to checking
+    the first line in case the model answers the label first anyway."""
+    empty = {"content_type": pd.NA, "content_type_justification": pd.NA}
     if not raw:
-        return {"content_type": pd.NA}
-    answer = raw.strip().upper()
-    if answer.startswith("POLICY"):
-        return {"content_type": "Policy"}
-    elif answer.startswith("ENTITY"):
-        return {"content_type": "Entity"}
-    return {"content_type": pd.NA}
+        return empty
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return empty
+
+    def _label(word: str):
+        word = word.upper()
+        if word.startswith("POLICY"):
+            return "Policy"
+        if word.startswith("ENTITY"):
+            return "Entity"
+        return None
+
+    label = _label(lines[-1])
+    if label is not None:
+        justification = " ".join(lines[:-1]).strip() or pd.NA
+        return {"content_type": label, "content_type_justification": justification}
+
+    label = _label(lines[0])
+    if label is not None:
+        justification = " ".join(lines[1:]).strip() or pd.NA
+        return {"content_type": label, "content_type_justification": justification}
+
+    return empty
 
 
 def main() -> int:
@@ -131,12 +157,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            df["content_type"] = pd.Series(pd.NA, index=df.index, dtype="string")
+            for col in ("content_type", "content_type_justification"):
+                df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        df["content_type"] = pd.Series(pd.NA, index=df.index, dtype="string")
+        for col in ("content_type", "content_type_justification"):
+            df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
     client = TransformersClient(
@@ -165,7 +193,7 @@ def main() -> int:
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
         parse_fn=parse_output,
-        output_cols=["content_type"],
+        output_cols=["content_type", "content_type_justification"],
         skip_if_already_filled="content_type",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
@@ -192,9 +220,11 @@ def main() -> int:
 
     policy = int((df["content_type"] == "Policy").sum())
     entity = int((df["content_type"] == "Entity").sum())
+    just_count = int(df["content_type_justification"].notna().sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
-        f"(content_type: {policy:,} Policy / {entity:,} Entity)"
+        f"(content_type: {policy:,} Policy / {entity:,} Entity | "
+        f"content_type_justification: {just_count:,} filled)"
     )
 
     if Path(checkpoint_path).exists():

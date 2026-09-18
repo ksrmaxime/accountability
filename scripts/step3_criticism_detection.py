@@ -3,19 +3,22 @@ scripts/step3_criticism_detection.py
 
 STEP 3 of the accountability pipeline — first LLM run: criticism detection.
 
-Renamed from the legacy scripts/run3_pipeline.py. The prompt and the
-detection logic are UNCHANGED (this stage already worked well in the base
-pipeline) — the only real change is structural: the legacy run3 received a
-not-yet-exploded, one-row-per-article file and exploded it into one row per
-(article, keyword) itself (splitting a pipe-separated `matched_keywords`
-column). That exploding — plus alias canonicalisation, target typing and
-the councillor in-office filter — now happens once in step 2, so step 3's
-input is already one row per (article, target) with a single `keyword`
-value per row. This script just runs the LLM over that.
+Renamed from the legacy scripts/run3_pipeline.py. Structurally: the legacy
+run3 received a not-yet-exploded, one-row-per-article file and exploded it
+into one row per (article, keyword) itself (splitting a pipe-separated
+`matched_keywords` column). That exploding — plus alias canonicalisation,
+target typing and the councillor in-office filter — now happens once in
+step 2, so step 3's input is already one row per (article, target) with a
+single `keyword` value per row. This script just runs the LLM over that.
 
-For every row, the model is asked whether the row's `keyword` (the target)
-is criticised in the row's `text` (the full article) — both are injected
-directly into the prompt body exactly as before (see src/step3_prompts.py).
+The prompt itself was revised after a real full run showed both a missing
+justification and a tendency to flag the target as criticised when it was
+actually the one doing the criticising, or only mentioned in passing (see
+src/step3_prompts.py for the fix). The model now returns a one-sentence
+justification BEFORE the YES/NO label.
+
+Output columns: keyword_answer -> "YES" | "NO" | NA
+                keyword_justification -> free text | NA
 
 Usage
 -----
@@ -24,7 +27,7 @@ Usage
       --output_base data/output/step3 \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 5 --max_input_tokens 16384
+      --max_new_tokens 80 --max_input_tokens 16384
 """
 from __future__ import annotations
 
@@ -46,14 +49,35 @@ from src.step3_config import build_mask
 
 
 def parse_output(raw: str) -> dict:
+    """Parse "<justification sentence>\n...\nYES|NO" (justification first,
+    label last — see src/step3_prompts.py). Falls back to checking the
+    first line in case the model answers the label first anyway."""
+    empty = {"keyword_answer": pd.NA, "keyword_justification": pd.NA}
     if not raw:
-        return {"keyword_answer": pd.NA}
-    answer = raw.strip().upper()
-    if answer.startswith("YES"):
-        return {"keyword_answer": "YES"}
-    elif answer.startswith("NO"):
-        return {"keyword_answer": "NO"}
-    return {"keyword_answer": pd.NA}
+        return empty
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return empty
+
+    def _label(word: str):
+        word = word.upper()
+        if word.startswith("YES"):
+            return "YES"
+        if word.startswith("NO"):
+            return "NO"
+        return None
+
+    label = _label(lines[-1])
+    if label is not None:
+        justification = " ".join(lines[:-1]).strip() or pd.NA
+        return {"keyword_answer": label, "keyword_justification": justification}
+
+    label = _label(lines[0])
+    if label is not None:
+        justification = " ".join(lines[1:]).strip() or pd.NA
+        return {"keyword_answer": label, "keyword_justification": justification}
+
+    return empty
 
 
 def main() -> int:
@@ -136,13 +160,15 @@ def main() -> int:
             )
             Path(checkpoint_path).unlink()
             working = df.copy()
-            working["keyword_answer"] = pd.Series(pd.NA, index=working.index, dtype="string")
+            for col in ("keyword_answer", "keyword_justification"):
+                working[col] = pd.Series(pd.NA, index=working.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             working = ckpt
     else:
         working = df.copy()
-        working["keyword_answer"] = pd.Series(pd.NA, index=working.index, dtype="string")
+        for col in ("keyword_answer", "keyword_justification"):
+            working[col] = pd.Series(pd.NA, index=working.index, dtype="string")
 
     # --- LLM client ---
     client = TransformersClient(
@@ -171,7 +197,7 @@ def main() -> int:
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
         parse_fn=parse_output,
-        output_cols=["keyword_answer"],
+        output_cols=["keyword_answer", "keyword_justification"],
         skip_if_already_filled="keyword_answer",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
@@ -198,9 +224,11 @@ def main() -> int:
 
     yes_count = int((working["keyword_answer"] == "YES").sum())
     no_count  = int((working["keyword_answer"] == "NO").sum())
+    just_count = int(working["keyword_justification"].notna().sum())
     print(
         f"Saved: {parquet_path} | {len(working):,} (article, target) rows "
-        f"(keyword_answer: {yes_count:,} YES / {no_count:,} NO)"
+        f"(keyword_answer: {yes_count:,} YES / {no_count:,} NO | "
+        f"keyword_justification: {just_count:,} filled)"
     )
 
     if Path(checkpoint_path).exists():

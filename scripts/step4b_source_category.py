@@ -11,9 +11,14 @@ Rows step 4a did NOT mark SOURCED (JOURNALIST, or never reached because
 step 3 did not confirm criticism) are left untouched — `source_category`
 stays NA for those rows.
 
-Output column: source_category ->
+The category definitions are unchanged; the model now names who it thinks
+is speaking (one sentence) before committing to a category label, same
+justification-first pattern as every other step.
+
+Output columns: source_category ->
   "Interest Group" | "Civil Servant" | "General Public" | "Politician" |
   "Administrative Unit of the State" | "Other" | NA
+                 source_category_justification -> free text | NA
 
 Usage
 -----
@@ -22,7 +27,7 @@ Usage
       --output_base data/output/step4b \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 20 --max_input_tokens 16384
+      --max_new_tokens 90 --max_input_tokens 16384
 """
 from __future__ import annotations
 
@@ -54,13 +59,34 @@ _CATEGORIES_UPPER = {c.upper(): c for c in CATEGORIES}
 
 
 def parse_output(raw: str) -> dict:
+    """Parse "<who is speaking>\n...\n<category>" (justification first,
+    label last — see src/step4b_prompts.py). Falls back to checking the
+    first line in case the model answers the label first anyway."""
+    empty = {"source_category": pd.NA, "source_category_justification": pd.NA}
     if not raw:
-        return {"source_category": pd.NA}
-    answer = raw.strip().upper()
-    for cat_upper, cat in _CATEGORIES_UPPER.items():
-        if answer.startswith(cat_upper):
-            return {"source_category": cat}
-    return {"source_category": pd.NA}
+        return empty
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return empty
+
+    def _label(word: str):
+        word = word.upper()
+        for cat_upper, cat in _CATEGORIES_UPPER.items():
+            if word.startswith(cat_upper):
+                return cat
+        return None
+
+    label = _label(lines[-1])
+    if label is not None:
+        justification = " ".join(lines[:-1]).strip() or pd.NA
+        return {"source_category": label, "source_category_justification": justification}
+
+    label = _label(lines[0])
+    if label is not None:
+        justification = " ".join(lines[1:]).strip() or pd.NA
+        return {"source_category": label, "source_category_justification": justification}
+
+    return empty
 
 
 def main() -> int:
@@ -140,12 +166,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            df["source_category"] = pd.Series(pd.NA, index=df.index, dtype="string")
+            for col in ("source_category", "source_category_justification"):
+                df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        df["source_category"] = pd.Series(pd.NA, index=df.index, dtype="string")
+        for col in ("source_category", "source_category_justification"):
+            df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
     client = TransformersClient(
@@ -174,7 +202,7 @@ def main() -> int:
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
         parse_fn=parse_output,
-        output_cols=["source_category"],
+        output_cols=["source_category", "source_category_justification"],
         skip_if_already_filled="source_category",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
@@ -200,7 +228,9 @@ def main() -> int:
     df.to_csv(csv_path, index=False)
 
     counts = df["source_category"].value_counts(dropna=True)
-    print(f"Saved: {parquet_path} | {len(df):,} rows total")
+    just_count = int(df["source_category_justification"].notna().sum())
+    print(f"Saved: {parquet_path} | {len(df):,} rows total "
+          f"(source_category_justification: {just_count:,} filled)")
     print(counts.to_string())
 
     if Path(checkpoint_path).exists():

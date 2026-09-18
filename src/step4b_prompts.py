@@ -6,6 +6,11 @@ Only runs on rows step 4a marked SOURCED. Classifies the actor(s) behind
 the criticism into one of 6 broad categories — replacing the old pipeline's
 attempt to pin down the exact person, which is no longer needed now that
 only the broad group matters.
+
+The category definitions (SYSTEM_PROMPT) are UNCHANGED — only the user
+template now asks for a one-sentence justification before the final
+category label, so the model names who it thinks is speaking before
+committing to a category (same pattern as steps 3, 4a, 5 and 6).
 """
 from __future__ import annotations
 import pandas as pd
@@ -46,9 +51,8 @@ testimony or statement of one or more specific actors.
 ARTICLE:
 {article_text}
 
-Which category best describes the actor(s) criticizing "{keyword}"?
-
-Answer with exactly one of these category names, and nothing else:
+First, in one sentence, identify who is making this criticism.
+Then, on a new line, answer with exactly one of these category names, and nothing else:
 Interest Group, Civil Servant, General Public, Politician, Administrative Unit of the State, Other.\
 """
 

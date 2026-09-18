@@ -167,8 +167,14 @@ ADMIN_UNIT_GROUPS: list[tuple[str, str, list[str]]] = [
       "Staatssekretariat für internationale Finanzfragen", "SIF"]),
     ("AFF/EFV", "DFF/EFD",
      ["Administration fédérale des finances", "AFF", "Eidgenössische Finanzverwaltung", "EFV"]),
+    # NOTE: the bare abbreviation "EPA" is deliberately NOT listed as an alias
+    # here (unlike every other admin unit). On a real sample it matched the
+    # omega-3 fatty acid "EPA" (Eicosapentaensäure) far more often than the
+    # Office fédéral du personnel -- 146/152 of its matches in a spot check,
+    # essentially all noise. "OFPER" (the French abbreviation) is unambiguous
+    # and is kept.
     ("OFPER/EPA", "DFF/EFD",
-     ["Office fédéral du personnel", "OFPER", "Eidgenössisches Personalamt", "EPA"]),
+     ["Office fédéral du personnel", "OFPER", "Eidgenössisches Personalamt"]),
     ("AFC/ESTV", "DFF/EFD",
      ["Administration fédérale des contributions", "AFC", "Eidgenössische Steuerverwaltung", "ESTV"]),
     ("OFDF/BAZG", "DFF/EFD",
@@ -209,8 +215,15 @@ ADMIN_UNIT_GROUPS: list[tuple[str, str, list[str]]] = [
      ["Office fédéral de la communication", "OFCOM", "Bundesamt für Kommunikation", "BAKOM"]),
     ("OFEV/BAFU", "DETEC/UVEK",
      ["Office fédéral de l'environnement", "OFEV", "Bundesamt für Umwelt", "BAFU"]),
+    # NOTE: the bare abbreviation "ARE" is deliberately NOT listed as an
+    # alias here. It collides with the French unit of area ("un terrain de
+    # 15 ares") and, worse, with identically-named CANTONAL "Amt für
+    # Raumentwicklung" offices -- on a real sample 373/418 of its matches
+    # came from the bare abbreviation, and a spot check found a cantonal
+    # office quoted, not the federal one. The canonical label "ARE" is kept
+    # as the target's identifier; only its two unambiguous full names match.
     ("ARE", "DETEC/UVEK",
-     ["Office fédéral du développement territorial", "ARE", "Bundesamt für Raumentwicklung"]),
+     ["Office fédéral du développement territorial", "Bundesamt für Raumentwicklung"]),
 ]
 
 
@@ -514,18 +527,29 @@ class _TargetEntry:
         self.parent_dept = parent_dept
         self.patterns: list[tuple[str, re.Pattern, str]] = []  # (alias text, compiled pattern, lang)
 
-    def add_alias(self, alias: str) -> None:
-        pat = re.compile(r"\b" + re.escape(alias) + r"\b", re.IGNORECASE)
-        self.patterns.append((alias, pat, _alias_language(alias)))
+    def add_alias(self, alias: str, lang: Optional[str] = None) -> None:
+        # Swissdox text very commonly uses a typographic apostrophe (’)
+        # rather than a straight one (') in French elisions ("l'énergie",
+        # "d'État", ...) -- roughly half of a real sample does. Every
+        # spelled-out alias containing an apostrophe (22 of them, e.g. the
+        # DETEC/UVEK full French name) would otherwise silently fail to match
+        # against that (very common) typeset text. Accept either character.
+        escaped = re.escape(alias).replace("'", "['’]")
+        pat = re.compile(r"\b" + escaped + r"\b", re.IGNORECASE)
+        # lang=None -> auto-detect via the accent heuristic (correct for
+        # department/agency names, which really do differ by language).
+        # An explicit lang overrides it -- used for person names, see below.
+        self.patterns.append((alias, pat, lang if lang is not None else _alias_language(alias)))
 
 
 _TARGET_ENTRIES: dict[str, _TargetEntry] = {}
 
 
-def _register(canonical: str, target_type: str, parent_dept: Optional[str], aliases: list[str]) -> None:
+def _register(canonical: str, target_type: str, parent_dept: Optional[str], aliases: list[str],
+               lang: Optional[str] = None) -> None:
     entry = _TargetEntry(canonical, target_type, parent_dept)
     for alias in aliases:
-        entry.add_alias(alias)
+        entry.add_alias(alias, lang=lang)
     _TARGET_ENTRIES[canonical] = entry
 
 
@@ -543,7 +567,14 @@ def _build_registry() -> None:
         _register(canonical, INDEPENDENT_AGENCY, None, aliases)
 
     for name in COUNCILLORS:
-        _register(name, FEDERAL_COUNCILLOR, None, [name])
+        # A person's name is not a French or German word -- it's written
+        # identically in both languages (unlike department/agency names,
+        # which genuinely differ). Force lang="both" instead of letting the
+        # accent heuristic decide: without this, "Albert Rösti" was tagged
+        # "de" purely because of the "ö" and became invisible to every
+        # French-language article that named him -- a real bug found on a
+        # live sample (see conversation).
+        _register(name, FEDERAL_COUNCILLOR, None, [name], lang="both")
 
 
 _build_registry()
@@ -620,8 +651,15 @@ def self_check(legacy_departments=None, legacy_admin_units=None, legacy_independ
         assert not extra, f"Taxonomy has department aliases not in legacy DEPARTMENTS: {extra}"
 
     if legacy_admin_units is not None:
+        # Deliberately excluded from matching (kept in the legacy Swissdox
+        # QUERY keyword list, which wants broad recall, but dropped here
+        # because they produced near-total false-positive noise on a real
+        # sample: "EPA" mostly matched the omega-3 fatty acid, "ARE" mostly
+        # matched the French unit of area or a cantonal office of the same
+        # name). See the NOTE comments next to OFPER/EPA and ARE above.
+        _intentionally_excluded = {"EPA", "ARE"}
         mine = {a for canonical, _p, aliases in ADMIN_UNIT_GROUPS for a in aliases}
-        missing = set(legacy_admin_units) - mine
+        missing = set(legacy_admin_units) - mine - _intentionally_excluded
         extra = mine - set(legacy_admin_units)
         assert not missing, f"ADMIN_UNITS aliases missing from taxonomy: {missing}"
         assert not extra, f"Taxonomy has admin-unit aliases not in legacy ADMIN_UNITS: {extra}"

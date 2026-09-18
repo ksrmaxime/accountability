@@ -35,7 +35,7 @@ BACKEND=transformers
 
 # Inference
 BATCH_SIZE=4
-MAX_NEW_TOKENS=5      # reponse = POLICY ou ENTITY = 1 token
+MAX_NEW_TOKENS=80     # justification (1 phrase) + POLICY ou ENTITY
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 

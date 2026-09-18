@@ -35,7 +35,7 @@ BACKEND=transformers
 
 # Inference
 BATCH_SIZE=8
-MAX_NEW_TOKENS=20      # 6 categories, la plus longue = 'Administrative Unit of the State'
+MAX_NEW_TOKENS=90     # justification (1 phrase) + categorie (la plus longue = 'Administrative Unit of the State')
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 

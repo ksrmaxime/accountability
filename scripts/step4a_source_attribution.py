@@ -4,15 +4,20 @@ scripts/step4a_source_attribution.py
 STEP 4a of the accountability pipeline — first half of source detection.
 
 For every (article, target) row step 3 confirmed as a criticism, asks the
-LLM a single yes/no-style question: is the criticism attributed to a
-specific external actor (quoted, named, or clearly referenced), or is it
-just the journalist's own narrative framing with no such actor?
+LLM to first identify (in one sentence) who -- if anyone -- is named as
+making the criticism, then commit to a SOURCED / JOURNALIST label. A real
+full run with the original one-shot (no reasoning) version of this prompt
+produced only 7 SOURCED out of ~13,000 eligible rows -- essentially always
+JOURNALIST even when a spot check found named actors quoted directly. See
+src/step4a_prompts.py for the fix (justification-first, like every other
+step now).
 
 Rows step 3 did NOT flag as criticism (keyword_answer != "YES") are left
 untouched in the output — this script only ever reads keyword_answer, it
 never overwrites it, and `source_attribution` stays NA for those rows.
 
-Output column: source_attribution -> "SOURCED" | "JOURNALIST" | NA
+Output columns: source_attribution -> "SOURCED" | "JOURNALIST" | NA
+                source_attribution_justification -> free text | NA
 
 Usage
 -----
@@ -21,7 +26,7 @@ Usage
       --output_base data/output/step4a \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 5 --max_input_tokens 16384
+      --max_new_tokens 80 --max_input_tokens 16384
 """
 from __future__ import annotations
 
@@ -43,14 +48,35 @@ from src.step4a_config import build_mask
 
 
 def parse_output(raw: str) -> dict:
+    """Parse "<who, if anyone>\n...\nSOURCED|JOURNALIST" (justification
+    first, label last — see src/step4a_prompts.py). Falls back to checking
+    the first line in case the model answers the label first anyway."""
+    empty = {"source_attribution": pd.NA, "source_attribution_justification": pd.NA}
     if not raw:
-        return {"source_attribution": pd.NA}
-    answer = raw.strip().upper()
-    if answer.startswith("SOURCED"):
-        return {"source_attribution": "SOURCED"}
-    elif answer.startswith("JOURNALIST"):
-        return {"source_attribution": "JOURNALIST"}
-    return {"source_attribution": pd.NA}
+        return empty
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
+        return empty
+
+    def _label(word: str):
+        word = word.upper()
+        if word.startswith("SOURCED"):
+            return "SOURCED"
+        if word.startswith("JOURNALIST"):
+            return "JOURNALIST"
+        return None
+
+    label = _label(lines[-1])
+    if label is not None:
+        justification = " ".join(lines[:-1]).strip() or pd.NA
+        return {"source_attribution": label, "source_attribution_justification": justification}
+
+    label = _label(lines[0])
+    if label is not None:
+        justification = " ".join(lines[1:]).strip() or pd.NA
+        return {"source_attribution": label, "source_attribution_justification": justification}
+
+    return empty
 
 
 def main() -> int:
@@ -131,12 +157,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            df["source_attribution"] = pd.Series(pd.NA, index=df.index, dtype="string")
+            for col in ("source_attribution", "source_attribution_justification"):
+                df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        df["source_attribution"] = pd.Series(pd.NA, index=df.index, dtype="string")
+        for col in ("source_attribution", "source_attribution_justification"):
+            df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
     client = TransformersClient(
@@ -166,7 +194,7 @@ def main() -> int:
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
         parse_fn=parse_output,
-        output_cols=["source_attribution"],
+        output_cols=["source_attribution", "source_attribution_justification"],
         skip_if_already_filled="source_attribution",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
@@ -193,9 +221,11 @@ def main() -> int:
 
     sourced = int((df["source_attribution"] == "SOURCED").sum())
     journalist = int((df["source_attribution"] == "JOURNALIST").sum())
+    just_count = int(df["source_attribution_justification"].notna().sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
-        f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST)"
+        f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST | "
+        f"source_attribution_justification: {just_count:,} filled)"
     )
 
     if Path(checkpoint_path).exists():

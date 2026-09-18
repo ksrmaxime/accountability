@@ -9,10 +9,14 @@ LLM whether the target gives a response to the criticism directed at it in
 the article. Runs independently of step 4a/4b/5, on every keyword_answer ==
 "YES" row (rows step 3 did not confirm as criticism are left untouched).
 
-Ported from the legacy run7 stage: SYSTEM_PROMPT / USER_TEMPLATE wording and
-the YES/NO + one-line-justification parsing are unchanged. See
-src/step6_prompts.py for how the old free-text `critic_answer_final` source
-description is now reconstructed from step 4a/4b's structured columns.
+Ported from the legacy run7 stage: SYSTEM_PROMPT wording is unchanged. The
+final two USER_TEMPLATE instructions were reordered — justification now
+comes before the YES/NO answer instead of after, for consistency with
+steps 3, 4a, 4b and 5, which all now use the same "justification first"
+pattern (the parsing below was updated to match: last line = label, the
+rest = justification). See src/step6_prompts.py for how the old free-text
+`critic_answer_final` source description is now reconstructed from step
+4a/4b's structured columns.
 
 Output columns: admin_response -> "YES" | "NO" | NA
                 admin_response_justification -> free text | NA
@@ -48,21 +52,35 @@ OUTPUT_COLS = ["admin_response", "admin_response_justification"]
 
 
 def parse_output(raw: str) -> dict:
+    """Parse "<justification sentence>\n...\nYES|NO" (justification first,
+    label last — see src/step6_prompts.py). Falls back to checking the
+    first line in case the model answers the label first anyway."""
     empty = {"admin_response": pd.NA, "admin_response_justification": pd.NA}
     if not raw:
         return empty
-    lines = raw.strip().splitlines()
-    first = lines[0].strip().upper()
-    if first.startswith("YES"):
-        answer = "YES"
-    elif first.startswith("NO"):
-        answer = "NO"
-    else:
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if not lines:
         return empty
-    justification = "\n".join(lines[1:]).strip() if len(lines) > 1 else pd.NA
-    if isinstance(justification, str) and not justification:
-        justification = pd.NA
-    return {"admin_response": answer, "admin_response_justification": justification}
+
+    def _label(word: str):
+        word = word.upper()
+        if word.startswith("YES"):
+            return "YES"
+        if word.startswith("NO"):
+            return "NO"
+        return None
+
+    label = _label(lines[-1])
+    if label is not None:
+        justification = " ".join(lines[:-1]).strip() or pd.NA
+        return {"admin_response": label, "admin_response_justification": justification}
+
+    label = _label(lines[0])
+    if label is not None:
+        justification = " ".join(lines[1:]).strip() or pd.NA
+        return {"admin_response": label, "admin_response_justification": justification}
+
+    return empty
 
 
 def main() -> int:

@@ -3,9 +3,13 @@
 STEP 6 — admin response: does the target respond to the criticism directed
 at it?
 
-Ported unchanged from the legacy run7 stage (SYSTEM_PROMPT / USER_TEMPLATE
-wording untouched, per instruction). The only real change is how the
-`{source}` slot is filled: the legacy pipeline had a free-text
+Ported from the legacy run7 stage with the SYSTEM_PROMPT wording untouched.
+The USER_TEMPLATE's final two instructions were reordered (justification
+now comes before the YES/NO answer instead of after) for consistency with
+steps 3, 4a, 4b and 5, which all now use the same "justification first"
+pattern — the sentence-level wording of both instructions is otherwise
+unchanged. The other real change is how the `{source}` slot is filled: the
+legacy pipeline had a free-text
 `critic_answer_final` column (an open-ended "who criticizes?" answer,
 arbitrated/validated through run4arbitre + run5). That column does not exist
 in this pipeline — it has been replaced by step 4a's binary
@@ -32,8 +36,8 @@ ARTICLE:
 Your task is to determine whether, in the article, "{keyword}" gives a response \
 to the reproach addressed to them.
 
-Answer YES or NO on the first line.
-On the second line, briefly justify your answer in one sentence, based solely on the article.\
+First, in one sentence, briefly justify your answer based solely on the article.
+Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
 # step 4b source_category -> natural-language phrase, in the register of the

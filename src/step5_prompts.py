@@ -9,6 +9,10 @@ Policy / Both / Unclear) with a long example bank. Only the Policy/Entity
 distinction is needed now, so the model is asked a single forced-choice
 question, in the same spirit as step 3's YES/NO and step 4a's SOURCED/
 JOURNALIST.
+
+The category definitions (SYSTEM_PROMPT) are UNCHANGED — only the user
+template now asks for a one-sentence justification before the final
+POLICY/ENTITY label (same pattern as steps 3, 4a, 4b and 6).
 """
 from __future__ import annotations
 import pandas as pd
@@ -45,7 +49,8 @@ ARTICLE:
 
 Is this criticism about a specific PUBLIC POLICY choice made by "{keyword}", or about "{keyword}" as an ENTITY (its behaviour, competence, efficiency, integrity, or a personal/institutional scandal)?
 
-Answer with exactly one word: POLICY or ENTITY.\
+First, in one sentence, justify your answer based on the article.
+Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
 """
 
 

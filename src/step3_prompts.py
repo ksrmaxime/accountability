@@ -1,28 +1,48 @@
 # src/step3_prompts.py
 """
-STEP 3 — criticism detection. Renamed 1:1 from the legacy src/run3_prompts.py;
-prompt wording and logic are UNCHANGED on purpose (this stage already worked
-well in the base pipeline).
+STEP 3 — criticism detection.
 
-One thing step 2 changed structurally: `keyword` is now a canonical name
-that can unify several aliases of the same target (e.g. "EDA" and "DFAE"
-both become "DFAE/EDA"). Showing that composite label to the LLM would be a
-real behaviour change even though this file's prompt text never moved, so
-the prompt uses `matched_alias` instead — the literal term step 2 actually
-found in *this* article's own text — which is exactly what the legacy
-pipeline showed the model. `keyword` remains available on every row for
-grouping/counting once the LLM's answers come back.
+Originally ported 1:1 from the legacy src/run3_prompts.py with the wording
+left untouched. After a real full run, two problems showed up in the actual
+results: (1) no justification was captured at all, so a wrong answer could
+not be diagnosed, and (2) the model sometimes seems to flag "{keyword}" as
+YES when it is actually the one doing the criticizing (or merely mentioned
+near criticism of something else), not the one being criticized. This
+version keeps the same core binary question but:
+  - explicitly tells the model not to confuse "{keyword} is criticized"
+    with "{keyword} is the one criticizing",
+  - asks for a one-sentence justification BEFORE the final YES/NO answer,
+    to force the small model to reason about the text instead of pattern-
+    matching straight to a label (same "reasoning before conclusion"
+    pattern already used in step 6, now applied consistently everywhere).
+
+`matched_alias` is still used instead of the canonical `keyword` for the
+same reason as before: it's the literal term step 2 found in *this*
+article's own text.
 """
 from __future__ import annotations
 import pandas as pd
 
-SYSTEM_PROMPT = ""
+SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+You read a newspaper article and judge whether one specific, named entity
+is criticized in it. Be careful to distinguish an entity being criticized
+from an entity that is itself doing the criticizing, or one that is simply
+mentioned in a neutral or unrelated context.\
+"""
 
 USER_TEMPLATE = """\
-You will receive an article to analyze. Your task is to tell if "{keyword}" is being criticized in this article. Criticism can be express even if the overall evaluation is positive in the article. The criticism can be about who it is or what it did. Answer ONLY by YES or NO nothing else
+In the article below, focus specifically on "{keyword}".
 
 ARTICLE:
-{article_text}\
+{article_text}
+
+Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
+
+Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
+
+First, in one sentence, briefly justify your answer based on the article.
+Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
 

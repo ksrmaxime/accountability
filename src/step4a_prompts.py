@@ -2,21 +2,32 @@
 """
 STEP 4a — source attribution (first half of what "step4" used to be).
 
-Small-model-friendly by design: a single binary question, answered in one
-word, exactly like step 3's YES/NO. This replaces the old, much heavier
-run4 -> run4eval -> run4arbitre chain (summarise, then detect, then
-classify, cross-checked by extra verification prompts) built to pin down
-the *exact person* criticising. That precision isn't needed anymore since
-only the broad category of source matters now — so the question is split
-into two small, separate steps instead: this one asks only whether a
-specific external actor is quoted/referenced at all; step 4b (run only on
-the rows answered SOURCED here) asks which broad category that actor
-belongs to.
+A real full run showed this stage badly miscalibrated: out of ~13,000
+confirmed-criticism rows, only 7 were labelled SOURCED, the rest almost all
+JOURNALIST -- yet a spot check of JOURNALIST-labelled articles found named
+actors, letters, and institutional sources quoted directly. The original
+one-shot binary question ("is this backed by testimony... or is it purely
+the journalist's own narrative framing...") packs two dense clauses into a
+single sentence and asks for an immediate one-word answer with no reasoning
+step; for an 8B model that combination collapses to "JOURNALIST" as a
+default almost every time.
+
+Fix: make the model search for and name a candidate actor FIRST (forcing it
+to actually engage with the text), and only then commit to the SOURCED /
+JOURNALIST label on a separate line -- the same justification-before-answer
+pattern used everywhere else in this pipeline.
 """
 from __future__ import annotations
 import pandas as pd
 
-SYSTEM_PROMPT = ""
+SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+You are given a newspaper article in which a specific target is criticized.
+Your task is to determine whether that criticism is attributed to a
+specific, identifiable actor (a named person, organization, or
+institution), or whether it is simply the journalist's own narrative
+framing, with no specific actor identified as making the criticism.\
+"""
 
 USER_TEMPLATE = """\
 In the article below, "{keyword}" is criticized.
@@ -24,11 +35,12 @@ In the article below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Is this criticism backed by the testimony, statement, or quote of one or more specific external actors, or is it purely the journalist's own narrative framing, with no specific actor identified as making the criticism?
+Look for a specific person, organization, or institution that is quoted, named, or clearly identified as making this criticism (for example: a named politician, an interest group, another authority, a civil servant, or a member of the public).
 
-Answer with exactly one word:
-SOURCED — if one or more specific actors are quoted, named, or clearly referenced as making the criticism.
-JOURNALIST — if the criticism is presented as the article's own narrative, with no specific actor identified.\
+First, in one sentence, say who -- if anyone -- is identified as making the criticism, or state that no specific actor is identified.
+Then, on a new line, answer with exactly one word:
+SOURCED — if a specific actor is quoted, named, or clearly identified as making the criticism.
+JOURNALIST — if no specific actor is identified and the criticism is presented as the article's own narrative.\
 """
 
 
