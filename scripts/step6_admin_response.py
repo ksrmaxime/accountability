@@ -9,17 +9,27 @@ LLM whether the target gives a response to the criticism directed at it in
 the article. Runs independently of step 4a/4b/5, on every keyword_answer ==
 "YES" row (rows step 3 did not confirm as criticism are left untouched).
 
-Ported from the legacy run7 stage: SYSTEM_PROMPT wording is unchanged. The
-final two USER_TEMPLATE instructions were reordered — justification now
-comes before the YES/NO answer instead of after, for consistency with
-steps 3, 4a, 4b and 5, which all now use the same "justification first"
-pattern (the parsing below was updated to match: last line = label, the
-rest = justification). See src/step6_prompts.py for how the old free-text
-`critic_answer_final` source description is now reconstructed from step
-4a/4b's structured columns.
+Ported from the legacy run7 stage: SYSTEM_PROMPT wording is unchanged. See
+src/step6_prompts.py for how the old free-text `critic_answer_final` source
+description is now reconstructed from step 4a/4b's structured columns.
 
-Output columns: admin_response -> "YES" | "NO" | NA
-                admin_response_justification -> free text | NA
+Two-pass design (added after the justification-first run showed the label
+sometimes contradicting its own justification — see src/verify_utils.py).
+This step showed the worst case of the problem: of the rows labelled YES,
+40% had a justification that explicitly said no response was given. Splitting
+the two passes fixes exactly this:
+
+  Pass 1 (draft)  — reads the article, writes the justification, then a
+    first-guess YES/NO label right after it. Both are kept: the
+    justification under `admin_response_justification`, the first-guess
+    label under `admin_response_draft` (QA only).
+  Pass 2 (verify) — reads ONLY `admin_response_justification` (no article)
+    and classifies it into YES/NO. This is the FINAL label, saved as
+    `admin_response`.
+
+Output columns: admin_response              -> "YES" | "NO" | NA  (final, pass 2)
+                admin_response_draft         -> "YES" | "NO" | NA  (pass 1, QA only)
+                admin_response_justification -> free text | NA     (pass 1)
 
 Usage
 -----
@@ -28,7 +38,8 @@ Usage
       --output_base data/output/step6 \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 150 --max_input_tokens 16384
+      --max_new_tokens 150 --max_input_tokens 16384 \\
+      --verify_batch_size 16 --verify_max_new_tokens 8 --verify_max_input_tokens 512
 """
 from __future__ import annotations
 
@@ -45,17 +56,22 @@ import pandas as pd
 
 from src.client import TransformersClient, LLMConfig
 from src.runner import run_llm_dataframe, RunConfig
-from src.step6_prompts import SYSTEM_PROMPT, build_user_prompt
+from src.step6_prompts import (
+    SYSTEM_PROMPT, build_user_prompt,
+    VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+)
 from src.step6_config import build_mask
+from src.verify_utils import parse_label_only
 
-OUTPUT_COLS = ["admin_response", "admin_response_justification"]
+DRAFT_COLS = ["admin_response_draft", "admin_response_justification"]
+FINAL_COLS = ["admin_response"]
+ALL_COLS = DRAFT_COLS + FINAL_COLS
+
+VERIFY_LABELS = {"YES": "YES", "NO": "NO"}
 
 
-def parse_output(raw: str) -> dict:
-    """Parse "<justification sentence>\n...\nYES|NO" (justification first,
-    label last — see src/step6_prompts.py). Falls back to checking the
-    first line in case the model answers the label first anyway."""
-    empty = {"admin_response": pd.NA, "admin_response_justification": pd.NA}
+def parse_draft_output(raw: str) -> dict:
+    empty = {"admin_response_draft": pd.NA, "admin_response_justification": pd.NA}
     if not raw:
         return empty
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
@@ -73,14 +89,18 @@ def parse_output(raw: str) -> dict:
     label = _label(lines[-1])
     if label is not None:
         justification = " ".join(lines[:-1]).strip() or pd.NA
-        return {"admin_response": label, "admin_response_justification": justification}
+        return {"admin_response_draft": label, "admin_response_justification": justification}
 
     label = _label(lines[0])
     if label is not None:
         justification = " ".join(lines[1:]).strip() or pd.NA
-        return {"admin_response": label, "admin_response_justification": justification}
+        return {"admin_response_draft": label, "admin_response_justification": justification}
 
     return empty
+
+
+def parse_verify_output(raw: str) -> dict:
+    return {"admin_response": parse_label_only(raw, VERIFY_LABELS)}
 
 
 def main() -> int:
@@ -98,11 +118,17 @@ def main() -> int:
     ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
     ap.add_argument("--trust_remote_code", action="store_true")
 
-    # --- Inference ---
+    # --- Inference: pass 1 (draft, reads the full article) ---
     ap.add_argument("--batch_size",        required=True, type=int)
     ap.add_argument("--temperature",       required=True, type=float)
     ap.add_argument("--max_new_tokens",    required=True, type=int)
     ap.add_argument("--max_input_tokens",  required=True, type=int)
+
+    # --- Inference: pass 2 (verify, reads only the justification) ---
+    ap.add_argument("--verify_batch_size",       type=int,   default=16)
+    ap.add_argument("--verify_temperature",      type=float, default=0.0)
+    ap.add_argument("--verify_max_new_tokens",   type=int,   default=8)
+    ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -144,7 +170,7 @@ def main() -> int:
     expected_indices = set(df.index)
     eligible = int(build_mask(df, text_col=args.text_col).sum())
     print(f"[pipeline] {len(df):,} rows in chunk — {eligible:,} confirmed criticism "
-          f"rows sent to the LLM (rest keep admin_response = NA)")
+          f"rows sent to the LLM (rest keep admin_response = NA)", flush=True)
 
     if task_id is not None:
         checkpoint_path = args.output_base + f"_task{task_id}_checkpoint.parquet"
@@ -160,13 +186,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            for col in OUTPUT_COLS:
+            df = df.copy()
+            for col in ALL_COLS:
                 df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        for col in OUTPUT_COLS:
+        for col in ALL_COLS:
             df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
@@ -179,7 +206,8 @@ def main() -> int:
         )
     )
 
-    run_cfg = RunConfig(
+    # --- Pass 1: draft (justification + first-guess label, from the article) ---
+    draft_cfg = RunConfig(
         id_col="__index__",
         text_col=args.text_col,
         batch_size=args.batch_size,
@@ -187,19 +215,41 @@ def main() -> int:
         max_new_tokens=args.max_new_tokens,
         max_input_tokens=args.max_input_tokens,
     )
-
     df = run_llm_dataframe(
         df=df,
-        cfg=run_cfg,
+        cfg=draft_cfg,
         client=client,
         system_prompt=SYSTEM_PROMPT,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
-        parse_fn=parse_output,
-        output_cols=OUTPUT_COLS,
-        skip_if_already_filled=OUTPUT_COLS[0],
+        parse_fn=parse_draft_output,
+        output_cols=DRAFT_COLS,
+        skip_if_already_filled="admin_response_draft",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
+    )
+
+    # --- Pass 2: verify (final label, from the justification alone) ---
+    verify_cfg = RunConfig(
+        id_col="__index__",
+        text_col="admin_response_justification",
+        batch_size=args.verify_batch_size,
+        temperature=args.verify_temperature,
+        max_new_tokens=args.verify_max_new_tokens,
+        max_input_tokens=args.verify_max_input_tokens,
+    )
+    df = run_llm_dataframe(
+        df=df,
+        cfg=verify_cfg,
+        client=client,
+        system_prompt=VERIFY_SYSTEM_PROMPT,
+        select_mask_fn=lambda df_: df_["admin_response_draft"].notna(),
+        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
+        parse_fn=parse_verify_output,
+        output_cols=FINAL_COLS,
+        skip_if_already_filled="admin_response",
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=100,
     )
 
     # --- Save ALL rows ---
@@ -223,11 +273,15 @@ def main() -> int:
 
     yes_count  = int((df["admin_response"] == "YES").sum())
     no_count   = int((df["admin_response"] == "NO").sum())
+    na_count   = int(df["admin_response"].isna().sum())
     just_count = int(df["admin_response_justification"].notna().sum())
+    both = df["admin_response_draft"].notna() & df["admin_response"].notna()
+    disagree = int((df.loc[both, "admin_response_draft"] != df.loc[both, "admin_response"]).sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
-        f"(admin_response: {yes_count:,} YES / {no_count:,} NO | "
-        f"admin_response_justification: {just_count:,} filled)"
+        f"(admin_response: {yes_count:,} YES / {no_count:,} NO / {na_count:,} NA | "
+        f"admin_response_justification: {just_count:,} filled | "
+        f"draft/final disagreement: {disagree:,}/{int(both.sum()):,})"
     )
 
     if Path(checkpoint_path).exists():

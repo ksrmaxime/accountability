@@ -13,12 +13,20 @@ This runs independently of step 4a/4b: every row with keyword_answer ==
 is making the criticism. Rows step 3 did not confirm as criticism are left
 untouched — `content_type` stays NA for those.
 
-The category definitions are unchanged; the model now gives a one-sentence
-justification before the POLICY/ENTITY label, same justification-first
-pattern as every other step.
+Two-pass design (added after the justification-first run showed the label
+sometimes contradicting its own justification — see src/verify_utils.py):
 
-Output columns: content_type -> "Policy" | "Entity" | NA
-                content_type_justification -> free text | NA
+  Pass 1 (draft)  — reads the article, writes the justification, then a
+    first-guess POLICY/ENTITY label right after it. Both are kept: the
+    justification under `content_type_justification`, the first-guess
+    label under `content_type_draft` (QA only).
+  Pass 2 (verify) — reads ONLY `content_type_justification` (no article)
+    and classifies it into POLICY/ENTITY. This is the FINAL label, saved
+    as `content_type`.
+
+Output columns: content_type              -> "Policy" | "Entity" | NA  (final, pass 2)
+                content_type_draft         -> "Policy" | "Entity" | NA  (pass 1, QA only)
+                content_type_justification -> free text | NA            (pass 1)
 
 Usage
 -----
@@ -27,7 +35,8 @@ Usage
       --output_base data/output/step5 \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 80 --max_input_tokens 16384
+      --max_new_tokens 80 --max_input_tokens 16384 \\
+      --verify_batch_size 16 --verify_max_new_tokens 8 --verify_max_input_tokens 512
 """
 from __future__ import annotations
 
@@ -44,15 +53,22 @@ import pandas as pd
 
 from src.client import TransformersClient, LLMConfig
 from src.runner import run_llm_dataframe, RunConfig
-from src.step5_prompts import SYSTEM_PROMPT, build_user_prompt
+from src.step5_prompts import (
+    SYSTEM_PROMPT, build_user_prompt,
+    VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+)
 from src.step5_config import build_mask
+from src.verify_utils import parse_label_only
+
+DRAFT_COLS = ["content_type_draft", "content_type_justification"]
+FINAL_COLS = ["content_type"]
+ALL_COLS = DRAFT_COLS + FINAL_COLS
+
+VERIFY_LABELS = {"POLICY": "Policy", "ENTITY": "Entity"}
 
 
-def parse_output(raw: str) -> dict:
-    """Parse "<justification sentence>\n...\nPOLICY|ENTITY" (justification
-    first, label last — see src/step5_prompts.py). Falls back to checking
-    the first line in case the model answers the label first anyway."""
-    empty = {"content_type": pd.NA, "content_type_justification": pd.NA}
+def parse_draft_output(raw: str) -> dict:
+    empty = {"content_type_draft": pd.NA, "content_type_justification": pd.NA}
     if not raw:
         return empty
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
@@ -70,14 +86,18 @@ def parse_output(raw: str) -> dict:
     label = _label(lines[-1])
     if label is not None:
         justification = " ".join(lines[:-1]).strip() or pd.NA
-        return {"content_type": label, "content_type_justification": justification}
+        return {"content_type_draft": label, "content_type_justification": justification}
 
     label = _label(lines[0])
     if label is not None:
         justification = " ".join(lines[1:]).strip() or pd.NA
-        return {"content_type": label, "content_type_justification": justification}
+        return {"content_type_draft": label, "content_type_justification": justification}
 
     return empty
+
+
+def parse_verify_output(raw: str) -> dict:
+    return {"content_type": parse_label_only(raw, VERIFY_LABELS)}
 
 
 def main() -> int:
@@ -95,11 +115,17 @@ def main() -> int:
     ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
     ap.add_argument("--trust_remote_code", action="store_true")
 
-    # --- Inference ---
+    # --- Inference: pass 1 (draft, reads the full article) ---
     ap.add_argument("--batch_size",        required=True, type=int)
     ap.add_argument("--temperature",       required=True, type=float)
     ap.add_argument("--max_new_tokens",    required=True, type=int)
     ap.add_argument("--max_input_tokens",  required=True, type=int)
+
+    # --- Inference: pass 2 (verify, reads only the justification) ---
+    ap.add_argument("--verify_batch_size",       type=int,   default=16)
+    ap.add_argument("--verify_temperature",      type=float, default=0.0)
+    ap.add_argument("--verify_max_new_tokens",   type=int,   default=8)
+    ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -157,13 +183,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            for col in ("content_type", "content_type_justification"):
+            df = df.copy()
+            for col in ALL_COLS:
                 df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        for col in ("content_type", "content_type_justification"):
+        for col in ALL_COLS:
             df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
@@ -176,7 +203,8 @@ def main() -> int:
         )
     )
 
-    run_cfg = RunConfig(
+    # --- Pass 1: draft (justification + first-guess label, from the article) ---
+    draft_cfg = RunConfig(
         id_col="__index__",
         text_col=args.text_col,
         batch_size=args.batch_size,
@@ -184,19 +212,41 @@ def main() -> int:
         max_new_tokens=args.max_new_tokens,
         max_input_tokens=args.max_input_tokens,
     )
-
     df = run_llm_dataframe(
         df=df,
-        cfg=run_cfg,
+        cfg=draft_cfg,
         client=client,
         system_prompt=SYSTEM_PROMPT,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
-        parse_fn=parse_output,
-        output_cols=["content_type", "content_type_justification"],
-        skip_if_already_filled="content_type",
+        parse_fn=parse_draft_output,
+        output_cols=DRAFT_COLS,
+        skip_if_already_filled="content_type_draft",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
+    )
+
+    # --- Pass 2: verify (final label, from the justification alone) ---
+    verify_cfg = RunConfig(
+        id_col="__index__",
+        text_col="content_type_justification",
+        batch_size=args.verify_batch_size,
+        temperature=args.verify_temperature,
+        max_new_tokens=args.verify_max_new_tokens,
+        max_input_tokens=args.verify_max_input_tokens,
+    )
+    df = run_llm_dataframe(
+        df=df,
+        cfg=verify_cfg,
+        client=client,
+        system_prompt=VERIFY_SYSTEM_PROMPT,
+        select_mask_fn=lambda df_: df_["content_type_draft"].notna(),
+        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
+        parse_fn=parse_verify_output,
+        output_cols=FINAL_COLS,
+        skip_if_already_filled="content_type",
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=100,
     )
 
     # --- Save ALL rows ---
@@ -220,11 +270,13 @@ def main() -> int:
 
     policy = int((df["content_type"] == "Policy").sum())
     entity = int((df["content_type"] == "Entity").sum())
-    just_count = int(df["content_type_justification"].notna().sum())
+    na_count = int(df["content_type"].isna().sum())
+    both = df["content_type_draft"].notna() & df["content_type"].notna()
+    disagree = int((df.loc[both, "content_type_draft"] != df.loc[both, "content_type"]).sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
-        f"(content_type: {policy:,} Policy / {entity:,} Entity | "
-        f"content_type_justification: {just_count:,} filled)"
+        f"(content_type: {policy:,} Policy / {entity:,} Entity / {na_count:,} NA | "
+        f"draft/final disagreement: {disagree:,}/{int(both.sum()):,})"
     )
 
     if Path(checkpoint_path).exists():

@@ -59,3 +59,39 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
+
+
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of the nature of a
+criticism directed at a specific target. You are not shown the article
+itself -- your only task is to read that explanation and classify the
+criticism it describes into ONE of two categories.
+
+=== CATEGORIES ===
+
+  Entity  — the criticism targets the target ITSELF: its behaviour, competence,
+            efficiency, management, integrity, morality, or a personal or
+            institutional scandal involving it or the people who run it.
+
+  Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
+            CHOICE: a named bill, reform, regulation, budget, decision, or
+            proposal the target is responsible for.\
+"""
+
+VERIFY_USER_TEMPLATE = """\
+Here is an explanation, written by another analyst, of a criticism directed at "{keyword}":
+"{justification}"
+
+Based solely on this explanation, answer with exactly one word: POLICY or ENTITY.\
+"""
+
+
+def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)

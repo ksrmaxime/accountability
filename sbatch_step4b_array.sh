@@ -39,6 +39,13 @@ MAX_NEW_TOKENS=90     # justification (1 phrase) + categorie (la plus longue = '
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 
+# Pass 2 (verify) -- reads only the pass-1 justification, not the article,
+# so it needs a much smaller batch/context than pass 1 above.
+VERIFY_BATCH_SIZE=16
+VERIFY_MAX_NEW_TOKENS=12
+VERIFY_MAX_INPUT_TOKENS=512
+VERIFY_TEMPERATURE=0.0
+
 NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
 
 # =============================================================================
@@ -72,6 +79,7 @@ echo "INPUT=${INPUT} | OUTPUT_BASE=${OUTPUT_BASE}"
 echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID}"
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
+echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 
 python scripts/step4b_source_category.py \
   --input             "$INPUT" \
@@ -86,6 +94,10 @@ python scripts/step4b_source_category.py \
   --max_new_tokens    "$MAX_NEW_TOKENS" \
   --max_input_tokens  "$MAX_INPUT_TOKENS" \
   --temperature       "$TEMPERATURE" \
+  --verify_batch_size       "$VERIFY_BATCH_SIZE" \
+  --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
+  --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
+  --verify_temperature      "$VERIFY_TEMPERATURE" \
   --num_tasks         "$NUM_TASKS"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 

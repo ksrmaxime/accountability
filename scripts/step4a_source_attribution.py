@@ -4,20 +4,28 @@ scripts/step4a_source_attribution.py
 STEP 4a of the accountability pipeline — first half of source detection.
 
 For every (article, target) row step 3 confirmed as a criticism, asks the
-LLM to first identify (in one sentence) who -- if anyone -- is named as
-making the criticism, then commit to a SOURCED / JOURNALIST label. A real
-full run with the original one-shot (no reasoning) version of this prompt
-produced only 7 SOURCED out of ~13,000 eligible rows -- essentially always
-JOURNALIST even when a spot check found named actors quoted directly. See
-src/step4a_prompts.py for the fix (justification-first, like every other
-step now).
+LLM a single yes/no-style question: is the criticism attributed to a
+specific external actor (quoted, named, or clearly referenced), or is it
+just the journalist's own narrative framing with no such actor?
 
 Rows step 3 did NOT flag as criticism (keyword_answer != "YES") are left
 untouched in the output — this script only ever reads keyword_answer, it
 never overwrites it, and `source_attribution` stays NA for those rows.
 
-Output columns: source_attribution -> "SOURCED" | "JOURNALIST" | NA
-                source_attribution_justification -> free text | NA
+Two-pass design (added after the justification-first run showed the label
+sometimes contradicting its own justification — see src/verify_utils.py):
+
+  Pass 1 (draft)  — reads the article, names who (if anyone) is making the
+    criticism, then a first-guess SOURCED/JOURNALIST label right after it.
+    Both are kept: the justification under `source_attribution_justification`,
+    the first-guess label under `source_attribution_draft` (QA only).
+  Pass 2 (verify) — reads ONLY `source_attribution_justification` (no
+    article) and classifies it into SOURCED/JOURNALIST. This is the FINAL
+    label, saved as `source_attribution` — the name step 4b's mask uses.
+
+Output columns: source_attribution              -> "SOURCED" | "JOURNALIST" | NA  (final, pass 2)
+                source_attribution_draft         -> "SOURCED" | "JOURNALIST" | NA  (pass 1, QA only)
+                source_attribution_justification -> free text | NA                 (pass 1)
 
 Usage
 -----
@@ -26,7 +34,8 @@ Usage
       --output_base data/output/step4a \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 80 --max_input_tokens 16384
+      --max_new_tokens 80 --max_input_tokens 16384 \\
+      --verify_batch_size 16 --verify_max_new_tokens 8 --verify_max_input_tokens 512
 """
 from __future__ import annotations
 
@@ -43,15 +52,22 @@ import pandas as pd
 
 from src.client import TransformersClient, LLMConfig
 from src.runner import run_llm_dataframe, RunConfig
-from src.step4a_prompts import SYSTEM_PROMPT, build_user_prompt
+from src.step4a_prompts import (
+    SYSTEM_PROMPT, build_user_prompt,
+    VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+)
 from src.step4a_config import build_mask
+from src.verify_utils import parse_label_only
+
+DRAFT_COLS = ["source_attribution_draft", "source_attribution_justification"]
+FINAL_COLS = ["source_attribution"]
+ALL_COLS = DRAFT_COLS + FINAL_COLS
+
+VERIFY_LABELS = {"SOURCED": "SOURCED", "JOURNALIST": "JOURNALIST"}
 
 
-def parse_output(raw: str) -> dict:
-    """Parse "<who, if anyone>\n...\nSOURCED|JOURNALIST" (justification
-    first, label last — see src/step4a_prompts.py). Falls back to checking
-    the first line in case the model answers the label first anyway."""
-    empty = {"source_attribution": pd.NA, "source_attribution_justification": pd.NA}
+def parse_draft_output(raw: str) -> dict:
+    empty = {"source_attribution_draft": pd.NA, "source_attribution_justification": pd.NA}
     if not raw:
         return empty
     lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
@@ -69,14 +85,18 @@ def parse_output(raw: str) -> dict:
     label = _label(lines[-1])
     if label is not None:
         justification = " ".join(lines[:-1]).strip() or pd.NA
-        return {"source_attribution": label, "source_attribution_justification": justification}
+        return {"source_attribution_draft": label, "source_attribution_justification": justification}
 
     label = _label(lines[0])
     if label is not None:
         justification = " ".join(lines[1:]).strip() or pd.NA
-        return {"source_attribution": label, "source_attribution_justification": justification}
+        return {"source_attribution_draft": label, "source_attribution_justification": justification}
 
     return empty
+
+
+def parse_verify_output(raw: str) -> dict:
+    return {"source_attribution": parse_label_only(raw, VERIFY_LABELS)}
 
 
 def main() -> int:
@@ -94,11 +114,17 @@ def main() -> int:
     ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
     ap.add_argument("--trust_remote_code", action="store_true")
 
-    # --- Inference ---
+    # --- Inference: pass 1 (draft, reads the full article) ---
     ap.add_argument("--batch_size",        required=True, type=int)
     ap.add_argument("--temperature",       required=True, type=float)
     ap.add_argument("--max_new_tokens",    required=True, type=int)
     ap.add_argument("--max_input_tokens",  required=True, type=int)
+
+    # --- Inference: pass 2 (verify, reads only the justification) ---
+    ap.add_argument("--verify_batch_size",       type=int,   default=16)
+    ap.add_argument("--verify_temperature",      type=float, default=0.0)
+    ap.add_argument("--verify_max_new_tokens",   type=int,   default=8)
+    ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -126,7 +152,6 @@ def main() -> int:
         df = df.head(args.n_rows).copy()
         print(f"[n_rows] Subsetting to first {args.n_rows} rows")
 
-    # --- Chunk across tasks on ALL rows, then report how many are eligible ---
     if task_id is not None and num_tasks is not None:
         chunk_size = math.ceil(len(df) / num_tasks)
         start = task_id * chunk_size
@@ -157,13 +182,14 @@ def main() -> int:
                 flush=True,
             )
             Path(checkpoint_path).unlink()
-            for col in ("source_attribution", "source_attribution_justification"):
+            df = df.copy()
+            for col in ALL_COLS:
                 df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
-        for col in ("source_attribution", "source_attribution_justification"):
+        for col in ALL_COLS:
             df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
@@ -176,7 +202,8 @@ def main() -> int:
         )
     )
 
-    run_cfg = RunConfig(
+    # --- Pass 1: draft (justification + first-guess label, from the article) ---
+    draft_cfg = RunConfig(
         id_col="__index__",
         text_col=args.text_col,
         batch_size=args.batch_size,
@@ -184,20 +211,41 @@ def main() -> int:
         max_new_tokens=args.max_new_tokens,
         max_input_tokens=args.max_input_tokens,
     )
-
-    # --- Run LLM on confirmed-criticism rows only; the rest keep NA ---
     df = run_llm_dataframe(
         df=df,
-        cfg=run_cfg,
+        cfg=draft_cfg,
         client=client,
         system_prompt=SYSTEM_PROMPT,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: build_user_prompt(row, col),
-        parse_fn=parse_output,
-        output_cols=["source_attribution", "source_attribution_justification"],
-        skip_if_already_filled="source_attribution",
+        parse_fn=parse_draft_output,
+        output_cols=DRAFT_COLS,
+        skip_if_already_filled="source_attribution_draft",
         checkpoint_path=checkpoint_path,
         checkpoint_every=50,
+    )
+
+    # --- Pass 2: verify (final label, from the justification alone) ---
+    verify_cfg = RunConfig(
+        id_col="__index__",
+        text_col="source_attribution_justification",
+        batch_size=args.verify_batch_size,
+        temperature=args.verify_temperature,
+        max_new_tokens=args.verify_max_new_tokens,
+        max_input_tokens=args.verify_max_input_tokens,
+    )
+    df = run_llm_dataframe(
+        df=df,
+        cfg=verify_cfg,
+        client=client,
+        system_prompt=VERIFY_SYSTEM_PROMPT,
+        select_mask_fn=lambda df_: df_["source_attribution_draft"].notna(),
+        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
+        parse_fn=parse_verify_output,
+        output_cols=FINAL_COLS,
+        skip_if_already_filled="source_attribution",
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=100,
     )
 
     # --- Save ALL rows ---
@@ -219,13 +267,15 @@ def main() -> int:
     df.to_parquet(parquet_path, index=False)
     df.to_csv(csv_path, index=False)
 
-    sourced = int((df["source_attribution"] == "SOURCED").sum())
+    sourced    = int((df["source_attribution"] == "SOURCED").sum())
     journalist = int((df["source_attribution"] == "JOURNALIST").sum())
-    just_count = int(df["source_attribution_justification"].notna().sum())
+    na_count   = int(df["source_attribution"].isna().sum())
+    both = df["source_attribution_draft"].notna() & df["source_attribution"].notna()
+    disagree = int((df.loc[both, "source_attribution_draft"] != df.loc[both, "source_attribution"]).sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
-        f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST | "
-        f"source_attribution_justification: {just_count:,} filled)"
+        f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST / {na_count:,} NA | "
+        f"draft/final disagreement: {disagree:,}/{int(both.sum()):,})"
     )
 
     if Path(checkpoint_path).exists():

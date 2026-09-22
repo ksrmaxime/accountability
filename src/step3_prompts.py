@@ -51,3 +51,31 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
+
+
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of whether a specific
+entity is criticized in it. You are not shown the article itself -- your
+only task is to read that explanation and decide which final answer it
+supports.\
+"""
+
+VERIFY_USER_TEMPLATE = """\
+The question was: is "{keyword}" criticized in the article?
+
+Here is the explanation given by the other analyst:
+"{justification}"
+
+Based solely on this explanation, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)

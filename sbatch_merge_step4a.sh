@@ -105,6 +105,20 @@ if answer_col in merged.columns:
         pct = 100 * count / total
         print(f"  {ans}: {count:,} ({pct:.1f}%)")
 
+# Two-pass QA: how often did pass 2 (verify, reads only the justification)
+# overrule pass 1's first-guess draft label? A high rate here is exactly
+# the "label contradicts its own justification" failure this two-pass
+# design exists to catch -- see src/verify_utils.py.
+draft_col = answer_col + "_draft"
+if draft_col in merged.columns and answer_col in merged.columns:
+    both = merged[draft_col].notna() & merged[answer_col].notna()
+    n_both = int(both.sum())
+    if n_both:
+        disagree = int((merged.loc[both, draft_col] != merged.loc[both, answer_col]).sum())
+        pct = 100 * disagree / n_both
+        print(f"\n[merge] Pass 1/pass 2 disagreement on {answer_col}: "
+              f"{disagree:,}/{n_both:,} ({pct:.1f}%)")
+
 PYEOF
 
 # =============================================================================
