@@ -55,44 +55,30 @@ from src.runner import run_llm_dataframe, RunConfig
 from src.step4a_prompts import (
     SYSTEM_PROMPT, build_user_prompt,
     VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+    FORCE_SYSTEM_PROMPT, build_force_prompt,
 )
 from src.step4a_config import build_mask
-from src.verify_utils import parse_label_only
+from src.verify_utils import parse_label_only, parse_draft_labeled
 
 DRAFT_COLS = ["source_attribution_draft", "source_attribution_justification"]
 FINAL_COLS = ["source_attribution"]
-ALL_COLS = DRAFT_COLS + FINAL_COLS
+# Flag column: "TRUE" when a row's final answer came from the last-resort
+# forced one-word pass rather than a genuine two-pass verification -- see
+# the retry/force block in main(). NA for every normally-answered row.
+FLAG_COLS = ["source_attribution_forced"]
+ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS
 
 VERIFY_LABELS = {"SOURCED": "SOURCED", "JOURNALIST": "JOURNALIST"}
 
 
 def parse_draft_output(raw: str) -> dict:
+    """A bare label with no real justification is a full failure, not a
+    partial success -- see src/verify_utils.py:parse_draft_labeled."""
     empty = {"source_attribution_draft": pd.NA, "source_attribution_justification": pd.NA}
-    if not raw:
+    label, justification = parse_draft_labeled(raw, VERIFY_LABELS)
+    if label is None:
         return empty
-    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-    if not lines:
-        return empty
-
-    def _label(word: str):
-        word = word.upper()
-        if word.startswith("SOURCED"):
-            return "SOURCED"
-        if word.startswith("JOURNALIST"):
-            return "JOURNALIST"
-        return None
-
-    label = _label(lines[-1])
-    if label is not None:
-        justification = " ".join(lines[:-1]).strip() or pd.NA
-        return {"source_attribution_draft": label, "source_attribution_justification": justification}
-
-    label = _label(lines[0])
-    if label is not None:
-        justification = " ".join(lines[1:]).strip() or pd.NA
-        return {"source_attribution_draft": label, "source_attribution_justification": justification}
-
-    return empty
+    return {"source_attribution_draft": label, "source_attribution_justification": justification}
 
 
 def parse_verify_output(raw: str) -> dict:
@@ -119,6 +105,17 @@ def main() -> int:
     ap.add_argument("--temperature",       required=True, type=float)
     ap.add_argument("--max_new_tokens",    required=True, type=int)
     ap.add_argument("--max_input_tokens",  required=True, type=int)
+
+    # --- Pass 1 retries + last-resort force: every row step 3 flagged as
+    # criticism is supposed to get an answer here. temperature=0.0 retried
+    # unchanged would just reproduce the same failure, so each retry raises
+    # temperature and token budget a notch; whatever is still unresolved
+    # after --draft_max_retries gets one forced bare-word attempt (flagged
+    # via source_attribution_forced, never sent through pass 2). ---
+    ap.add_argument("--draft_max_retries",   type=int,   default=2,
+                    help="Extra pass-1 attempts (beyond the first) for eligible rows still unanswered, each at a higher temperature/token budget.")
+    ap.add_argument("--retry_temperature",   type=float, default=0.4,
+                    help="Temperature for the first retry attempt; raised by +0.2 per further attempt, capped at 0.9.")
 
     # --- Inference: pass 2 (verify, reads only the justification) ---
     ap.add_argument("--verify_batch_size",       type=int,   default=16)
@@ -225,6 +222,102 @@ def main() -> int:
         checkpoint_every=50,
     )
 
+    # --- Pass 1 retries: a temperature=0.0 retry of the identical prompt
+    # would just reproduce the identical failure, so each retry raises the
+    # temperature (and token budget, in case truncation was the culprit).
+    retry_temp = args.retry_temperature
+    retry_tokens = args.max_new_tokens
+    for attempt in range(1, args.draft_max_retries + 1):
+        still_na = build_mask(df, text_col=args.text_col) & df["source_attribution_draft"].isna()
+        n_remaining = int(still_na.sum())
+        if n_remaining == 0:
+            break
+        retry_tokens = min(retry_tokens + 60, 300)
+        print(
+            f"[retry pass1] attempt {attempt}/{args.draft_max_retries}: "
+            f"{n_remaining:,} eligible rows still without a draft answer -- "
+            f"retrying at temperature={retry_temp:.2f}, max_new_tokens={retry_tokens}",
+            flush=True,
+        )
+        retry_cfg = RunConfig(
+            id_col="__index__",
+            text_col=args.text_col,
+            batch_size=args.batch_size,
+            temperature=retry_temp,
+            max_new_tokens=retry_tokens,
+            max_input_tokens=args.max_input_tokens,
+        )
+        df = run_llm_dataframe(
+            df=df,
+            cfg=retry_cfg,
+            client=client,
+            system_prompt=SYSTEM_PROMPT,
+            select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_attribution_draft"].isna(),
+            build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+            parse_fn=parse_draft_output,
+            output_cols=DRAFT_COLS,
+            skip_if_already_filled="source_attribution_draft",
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=50,
+        )
+        retry_temp = min(retry_temp + 0.2, 0.9)
+
+    # --- Last resort: a bare one-word forced decision for whatever is still
+    # unresolved after every retry. No justification is requested (there is
+    # nothing left to try to extract from this model on this row), so the
+    # forced label is written straight to source_attribution and the row
+    # never goes through pass 2 -- source_attribution_forced=True marks it
+    # so it is never mistaken for a genuine two-pass-verified answer.
+    still_na = build_mask(df, text_col=args.text_col) & df["source_attribution_draft"].isna()
+    n_forced_candidates = int(still_na.sum())
+    if n_forced_candidates:
+        print(
+            f"[force] {n_forced_candidates:,} eligible rows unresolved after "
+            f"{args.draft_max_retries} retries -- forcing a bare one-word decision",
+            flush=True,
+        )
+
+        def parse_force_output(raw: str) -> dict:
+            label = parse_label_only(raw, VERIFY_LABELS)
+            if pd.isna(label):
+                return {}
+            return {
+                "source_attribution_draft": label,
+                "source_attribution": label,
+                "source_attribution_forced": "TRUE",
+            }
+
+        force_cfg = RunConfig(
+            id_col="__index__",
+            text_col=args.text_col,
+            batch_size=args.batch_size,
+            temperature=0.7,
+            max_new_tokens=8,
+            max_input_tokens=args.max_input_tokens,
+        )
+        df = run_llm_dataframe(
+            df=df,
+            cfg=force_cfg,
+            client=client,
+            system_prompt=FORCE_SYSTEM_PROMPT,
+            select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_attribution_draft"].isna(),
+            build_prompt_fn=lambda row, col: build_force_prompt(row, col),
+            parse_fn=parse_force_output,
+            output_cols=ALL_COLS,
+            skip_if_already_filled="source_attribution_draft",
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=50,
+        )
+
+    still_na = build_mask(df, text_col=args.text_col) & df["source_attribution_draft"].isna()
+    n_unresolved = int(still_na.sum())
+    if n_unresolved:
+        print(
+            f"[force] WARNING: {n_unresolved:,} eligible rows still have no answer "
+            f"even after the forced pass (source_attribution stays honestly NA for these).",
+            flush=True,
+        )
+
     # --- Pass 2: verify (final label, from the justification alone) ---
     verify_cfg = RunConfig(
         id_col="__index__",
@@ -239,7 +332,7 @@ def main() -> int:
         cfg=verify_cfg,
         client=client,
         system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["source_attribution_draft"].notna(),
+        select_mask_fn=lambda df_: df_["source_attribution_draft"].notna() & df_["source_attribution_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
         build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
         parse_fn=parse_verify_output,
         output_cols=FINAL_COLS,
@@ -270,12 +363,14 @@ def main() -> int:
     sourced    = int((df["source_attribution"] == "SOURCED").sum())
     journalist = int((df["source_attribution"] == "JOURNALIST").sum())
     na_count   = int(df["source_attribution"].isna().sum())
-    both = df["source_attribution_draft"].notna() & df["source_attribution"].notna()
+    forced     = int((df["source_attribution_forced"] == "TRUE").sum())
+    both = df["source_attribution_draft"].notna() & df["source_attribution"].notna() & df["source_attribution_justification"].notna()
     disagree = int((df.loc[both, "source_attribution_draft"] != df.loc[both, "source_attribution"]).sum())
     print(
         f"Saved: {parquet_path} | {len(df):,} rows total "
         f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST / {na_count:,} NA | "
-        f"draft/final disagreement: {disagree:,}/{int(both.sum()):,})"
+        f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
+        f"forced (no real verification): {forced:,})"
     )
 
     if Path(checkpoint_path).exists():

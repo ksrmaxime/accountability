@@ -62,7 +62,7 @@ from src.step3_prompts import (
     VERIFY_SYSTEM_PROMPT, build_verify_prompt,
 )
 from src.step3_config import build_mask
-from src.verify_utils import parse_label_only
+from src.verify_utils import parse_label_only, parse_draft_labeled
 
 DRAFT_COLS = ["keyword_answer_draft", "keyword_justification"]
 FINAL_COLS = ["keyword_answer"]
@@ -72,35 +72,13 @@ VERIFY_LABELS = {"YES": "YES", "NO": "NO"}
 
 
 def parse_draft_output(raw: str) -> dict:
-    """Parse "<justification sentence>\n...\nYES|NO" (justification first,
-    label last — see src/step3_prompts.py). Falls back to checking the
-    first line in case the model answers the label first anyway."""
+    """A bare label with no real justification is a full failure, not a
+    partial success -- see src/verify_utils.py:parse_draft_labeled."""
     empty = {"keyword_answer_draft": pd.NA, "keyword_justification": pd.NA}
-    if not raw:
+    label, justification = parse_draft_labeled(raw, VERIFY_LABELS)
+    if label is None:
         return empty
-    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-    if not lines:
-        return empty
-
-    def _label(word: str):
-        word = word.upper()
-        if word.startswith("YES"):
-            return "YES"
-        if word.startswith("NO"):
-            return "NO"
-        return None
-
-    label = _label(lines[-1])
-    if label is not None:
-        justification = " ".join(lines[:-1]).strip() or pd.NA
-        return {"keyword_answer_draft": label, "keyword_justification": justification}
-
-    label = _label(lines[0])
-    if label is not None:
-        justification = " ".join(lines[1:]).strip() or pd.NA
-        return {"keyword_answer_draft": label, "keyword_justification": justification}
-
-    return empty
+    return {"keyword_answer_draft": label, "keyword_justification": justification}
 
 
 def parse_verify_output(raw: str) -> dict:
@@ -250,7 +228,7 @@ def main() -> int:
         cfg=verify_cfg,
         client=client,
         system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["keyword_answer_draft"].notna(),
+        select_mask_fn=lambda df_: df_["keyword_answer_draft"].notna() & df_["keyword_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
         build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
         parse_fn=parse_verify_output,
         output_cols=FINAL_COLS,

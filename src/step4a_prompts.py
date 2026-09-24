@@ -79,3 +79,34 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
     return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)
+
+
+# --- Last resort (force): a bare one-word decision, no justification asked
+# for at all, used only for rows that still have no parseable pass-1 answer
+# after every retry of the full prompt above. Deliberately minimal -- the
+# goal here is just to stop a row from being silently dropped, not to
+# produce a reasoned judgment. Any row answered this way is flagged via
+# source_attribution_forced=True (see scripts/step4a_source_attribution.py)
+# and never goes through pass 2, since there is no justification to verify.
+
+FORCE_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Answer with exactly one word, nothing else.\
+"""
+
+FORCE_USER_TEMPLATE = """\
+In the article below, "{keyword}" is criticized.
+
+ARTICLE:
+{article_text}
+
+Is that criticism attributed to a specific, identifiable actor (a named person, organization, or institution), or is it just the journalist's own narrative framing with no such actor identified?
+
+Answer with exactly one word: SOURCED or JOURNALIST.\
+"""
+
+
+def build_force_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return FORCE_USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
