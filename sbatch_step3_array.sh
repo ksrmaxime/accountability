@@ -35,8 +35,17 @@ BACKEND=transformers
 
 # Inference
 BATCH_SIZE=4
-MAX_NEW_TOKENS=80     # justification (1 phrase) + YES ou NO
-MAX_INPUT_TOKENS=16384
+MAX_NEW_TOKENS=140    # justification (1 phrase) + YES ou NO -- releve de 80 a 140 (meme
+                      # correctif que step4a sur job65119601) : l'analyse du run job65125145
+                      # montre que les NA de step3 sont concentres sur les articles longs, et
+                      # avec seulement 80 tokens de budget de sortie une justification un peu
+                      # plus longue peut deja pousser le label YES/NO hors du budget avant
+                      # meme d'etre genere -- voir aussi le fix de troncature a gauche dans
+                      # src/client.py (meme diagnostic)
+MAX_INPUT_TOKENS=24576  # releve de 16384 : marge de securite supplementaire pour la queue
+                        # d'articles tres longs (jusqu'a ~373k caracteres observes) ; au-dela
+                        # de cette taille le fix de troncature a gauche (src/client.py) prend
+                        # le relais pour au moins preserver la consigne finale du prompt
 TEMPERATURE=0.0
 
 # Pass 2 (verify) -- reads only the pass-1 justification, not the article,
@@ -45,6 +54,12 @@ VERIFY_BATCH_SIZE=16
 VERIFY_MAX_NEW_TOKENS=8
 VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
+
+# Pass 1 retries + last-resort force -- every eligible row is now supposed
+# to come out of this step with a real answer (see src/verify_utils.py and
+# the retry/force block in the script). Same mechanism as step4a.
+DRAFT_MAX_RETRIES=2
+RETRY_TEMPERATURE=0.4
 
 NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
 
@@ -80,6 +95,7 @@ echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
+echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
 
 python scripts/step3_criticism_detection.py \
   --input             "$INPUT" \
@@ -98,6 +114,8 @@ python scripts/step3_criticism_detection.py \
   --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
   --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
+  --draft_max_retries       "$DRAFT_MAX_RETRIES" \
+  --retry_temperature       "$RETRY_TEMPERATURE" \
   --num_tasks         "$NUM_TASKS"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 

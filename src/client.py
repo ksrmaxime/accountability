@@ -57,6 +57,17 @@ class TransformersClient:
             trust_remote_code=cfg.trust_remote_code,
         )
         self.tok.padding_side = "left"
+        # Truncate from the LEFT (drop the start of the prompt, not the
+        # end) when a prompt exceeds max_input_tokens. Every prompt in
+        # this pipeline puts the article first and the actual instruction
+        # ("answer with exactly one word...") last -- the default
+        # right-truncation would silently cut off that instruction for
+        # any article long enough to overflow the budget, which the
+        # model would then have no way to comply with. Left-truncation
+        # instead sacrifices the beginning of the article, which is far
+        # less damaging. See the step3 NA investigation (job65125145
+        # report) for the evidence this was actually happening.
+        self.tok.truncation_side = "left"
         if self.tok.pad_token_id is None:
             self.tok.pad_token = self.tok.eos_token
 
@@ -107,7 +118,12 @@ class TransformersClient:
         for p in prompts:
             ids = self.tok.encode(p)
             if len(ids) > max_input_tokens:
-                ids = ids[:max_input_tokens]
+                # Keep the TAIL, not the head: the instruction asking for
+                # the final one-word answer sits at the end of every
+                # prompt in this pipeline, right after the article. See
+                # the matching truncation_side="left" fix in
+                # _init_transformers above for the full rationale.
+                ids = ids[-max_input_tokens:]
                 p = self.tok.decode(ids, skip_special_tokens=False)
             truncated.append(p)
 

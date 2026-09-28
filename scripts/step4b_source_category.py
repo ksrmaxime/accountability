@@ -58,6 +58,7 @@ from src.runner import run_llm_dataframe, RunConfig
 from src.step4b_prompts import (
     SYSTEM_PROMPT, build_user_prompt,
     VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+    FORCE_SYSTEM_PROMPT, build_force_prompt,
 )
 from src.step4b_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
@@ -74,7 +75,11 @@ _CATEGORIES_UPPER = {c.upper(): c for c in CATEGORIES}
 
 DRAFT_COLS = ["source_category_draft", "source_category_justification"]
 FINAL_COLS = ["source_category"]
-ALL_COLS = DRAFT_COLS + FINAL_COLS
+# Flag column: "TRUE" when a row's final answer came from the last-resort
+# forced pass rather than a genuine two-pass verification -- see the
+# retry/force block in main(). NA for every normally-answered row.
+FLAG_COLS = ["source_category_forced"]
+ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS
 
 # Pass 2 uses the exact same 6-way mapping as pass 1 — this is a genuine
 # multi-choice classification, not a binary one (unlike step 3/4a/5/6).
@@ -115,6 +120,18 @@ def main() -> int:
     ap.add_argument("--temperature",       required=True, type=float)
     ap.add_argument("--max_new_tokens",    required=True, type=int)
     ap.add_argument("--max_input_tokens",  required=True, type=int)
+
+    # --- Pass 1 retries + last-resort force: every eligible row is
+    # supposed to get an answer here. temperature=0.0 retried unchanged
+    # would just reproduce the same failure, so each retry raises
+    # temperature and token budget a notch; whatever is still unresolved
+    # after --draft_max_retries gets one forced category-only attempt
+    # (flagged via source_category_forced, never sent through pass 2).
+    # Mirrors step4a's own retry/force mechanism exactly. ---
+    ap.add_argument("--draft_max_retries",   type=int,   default=2,
+                    help="Extra pass-1 attempts (beyond the first) for eligible rows still unanswered, each at a higher temperature/token budget.")
+    ap.add_argument("--retry_temperature",   type=float, default=0.4,
+                    help="Temperature for the first retry attempt; raised by +0.2 per further attempt, capped at 0.9.")
 
     # --- Inference: pass 2 (verify, reads only the justification) ---
     ap.add_argument("--verify_batch_size",       type=int,   default=16)
@@ -221,6 +238,103 @@ def main() -> int:
         checkpoint_every=50,
     )
 
+    # --- Pass 1 retries: a temperature=0.0 retry of the identical prompt
+    # would just reproduce the identical failure, so each retry raises the
+    # temperature (and token budget, in case truncation was the culprit).
+    retry_temp = args.retry_temperature
+    retry_tokens = args.max_new_tokens
+    for attempt in range(1, args.draft_max_retries + 1):
+        still_na = build_mask(df, text_col=args.text_col) & df["source_category_draft"].isna()
+        n_remaining = int(still_na.sum())
+        if n_remaining == 0:
+            break
+        retry_tokens = min(retry_tokens + 60, 300)
+        print(
+            f"[retry pass1] attempt {attempt}/{args.draft_max_retries}: "
+            f"{n_remaining:,} eligible rows still without a draft answer -- "
+            f"retrying at temperature={retry_temp:.2f}, max_new_tokens={retry_tokens}",
+            flush=True,
+        )
+        retry_cfg = RunConfig(
+            id_col="__index__",
+            text_col=args.text_col,
+            batch_size=args.batch_size,
+            temperature=retry_temp,
+            max_new_tokens=retry_tokens,
+            max_input_tokens=args.max_input_tokens,
+        )
+        df = run_llm_dataframe(
+            df=df,
+            cfg=retry_cfg,
+            client=client,
+            system_prompt=SYSTEM_PROMPT,
+            select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_category_draft"].isna(),
+            build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+            parse_fn=parse_draft_output,
+            output_cols=DRAFT_COLS,
+            skip_if_already_filled="source_category_draft",
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=50,
+        )
+        retry_temp = min(retry_temp + 0.2, 0.9)
+
+    # --- Last resort: a bare category-only forced decision for whatever is
+    # still unresolved after every retry. No justification is requested
+    # (there is nothing left to try to extract from this model on this
+    # row), so the forced label is written straight to source_category and
+    # the row never goes through pass 2 -- source_category_forced=True
+    # marks it so it is never mistaken for a genuine two-pass-verified
+    # answer.
+    still_na = build_mask(df, text_col=args.text_col) & df["source_category_draft"].isna()
+    n_forced_candidates = int(still_na.sum())
+    if n_forced_candidates:
+        print(
+            f"[force] {n_forced_candidates:,} eligible rows unresolved after "
+            f"{args.draft_max_retries} retries -- forcing a bare category decision",
+            flush=True,
+        )
+
+        def parse_force_output(raw: str) -> dict:
+            label = parse_label_only(raw, VERIFY_LABELS)
+            if pd.isna(label):
+                return {}
+            return {
+                "source_category_draft": label,
+                "source_category": label,
+                "source_category_forced": "TRUE",
+            }
+
+        force_cfg = RunConfig(
+            id_col="__index__",
+            text_col=args.text_col,
+            batch_size=args.batch_size,
+            temperature=0.7,
+            max_new_tokens=16,
+            max_input_tokens=args.max_input_tokens,
+        )
+        df = run_llm_dataframe(
+            df=df,
+            cfg=force_cfg,
+            client=client,
+            system_prompt=FORCE_SYSTEM_PROMPT,
+            select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_category_draft"].isna(),
+            build_prompt_fn=lambda row, col: build_force_prompt(row, col),
+            parse_fn=parse_force_output,
+            output_cols=ALL_COLS,
+            skip_if_already_filled="source_category_draft",
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=50,
+        )
+
+    still_na = build_mask(df, text_col=args.text_col) & df["source_category_draft"].isna()
+    n_unresolved = int(still_na.sum())
+    if n_unresolved:
+        print(
+            f"[force] WARNING: {n_unresolved:,} eligible rows still have no answer "
+            f"even after the forced pass (source_category stays honestly NA for these).",
+            flush=True,
+        )
+
     # --- Pass 2: verify (final category, from the justification alone) ---
     verify_cfg = RunConfig(
         id_col="__index__",
@@ -265,10 +379,12 @@ def main() -> int:
 
     counts = df["source_category"].value_counts(dropna=True)
     na_count = int(df["source_category"].isna().sum())
+    forced   = int((df["source_category_forced"] == "TRUE").sum())
     both = df["source_category_draft"].notna() & df["source_category"].notna()
     disagree = int((df.loc[both, "source_category_draft"] != df.loc[both, "source_category"]).sum())
     print(f"Saved: {parquet_path} | {len(df):,} rows total | NA: {na_count:,} | "
-          f"draft/final disagreement: {disagree:,}/{int(both.sum()):,}")
+          f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
+          f"forced (no real verification): {forced:,}")
     print(counts.to_string())
 
     if Path(checkpoint_path).exists():

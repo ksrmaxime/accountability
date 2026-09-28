@@ -46,6 +46,12 @@ VERIFY_MAX_NEW_TOKENS=12
 VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
 
+# Pass 1 retries + last-resort force -- every eligible row is now supposed
+# to come out of this step with a real answer (see src/verify_utils.py and
+# the retry/force block in the script). Same mechanism as step4a/step3.
+DRAFT_MAX_RETRIES=2
+RETRY_TEMPERATURE=0.4
+
 NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
 
 # =============================================================================
@@ -80,6 +86,7 @@ echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
+echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
 
 python scripts/step4b_source_category.py \
   --input             "$INPUT" \
@@ -98,6 +105,8 @@ python scripts/step4b_source_category.py \
   --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
   --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
+  --draft_max_retries       "$DRAFT_MAX_RETRIES" \
+  --retry_temperature       "$RETRY_TEMPERATURE" \
   --num_tasks         "$NUM_TASKS"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 
