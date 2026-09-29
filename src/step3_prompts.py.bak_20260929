@@ -16,26 +16,6 @@ version keeps the same core binary question but:
     matching straight to a label (same "reasoning before conclusion"
     pattern already used in step 6, now applied consistently everywhere).
 
-2026-09-29 update: after the 09/28 fix to the missing-answer rate (see the
-force-prompt block below) let more rows through to a real judgment, a
-400-row gold-standard comparison surfaced two roughly opposite error
-patterns in the answered rows:
-  (a) false positives -- the model treats a neutral, factual, or merely
-      "could-be-read-negatively" statement about "{keyword}" (a forecast,
-      a statistic, a plain description of a decision) as if it were
-      criticism, effectively constructing the reproach itself rather than
-      finding one already made in the text;
-  (b) false negatives -- when a reproach explicitly targets a project,
-      program, or subordinate unit that is clearly "{keyword}"'s own
-      responsibility (e.g. a procurement project run by a department), the
-      model refuses to count it as criticism of "{keyword}" because
-      "{keyword}" itself is not named in the reproach.
-Two explicit rules (with short contrastive examples) were added to
-USER_TEMPLATE to address both patterns together, since fixing one in
-isolation risked making the other worse. FORCE_USER_TEMPLATE (the no-
-justification last-resort prompt, used for a negligible fraction of rows)
-was deliberately left unchanged to keep it minimal.
-
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -60,16 +40,6 @@ ARTICLE:
 Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
 
 Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
-
-Two further rules to apply carefully:
-
-1. Require an actual, explicit expression of criticism -- a reproach, a negative judgment, a denunciation, an accusation -- made by someone (a journalist, a quoted source, a political actor, etc.) in the text. A neutral fact, a forecast, a statistic, or a plain description of an action or decision attributed to "{keyword}" is NOT criticism by itself, even if a reader could imagine a negative reading of it. If you find yourself constructing the criticism from a neutral statement rather than finding one already made in the text, the answer is NO.
-   Example (NOT criticism -> NO): "{keyword} forecasts a budget deficit of 3 billion next year." This is a neutral statement, not a reproach.
-   Example (criticism -> YES): "Critics accuse {keyword} of hiding the true scale of the deficit." Here someone explicitly makes a reproach.
-
-2. Count as criticism of "{keyword}" not only reproaches that name it directly, but also reproaches aimed at a project, program, decision, or subordinate unit that clearly falls under its direct responsibility (e.g. a procurement project run by a department is attributable to that department, even if the reproach names the project or a supplier instead of the department itself). Do NOT extend this to criticism of a clearly separate and independent actor (another department, a parliamentary committee simply commenting, a private third party) that does not act under "{keyword}"'s authority.
-   Example (attributable -> YES): a parliamentary finance committee denounces cost overruns and delays in a defense-equipment project run by the ministry. This counts as criticism of the ministry.
-   Example (not attributable -> NO): a parliamentary committee's own conduct is criticized, or a private contractor is blamed for a defect with no reproach directed at the ministry's own decisions.
 
 First, in one sentence, briefly justify your answer based on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\
@@ -118,9 +88,7 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
 # to stop a row from being silently dropped, not to produce a reasoned
 # judgment. Any row answered this way is flagged via keyword_answer_forced
 # = "TRUE" (see scripts/step3_criticism_detection.py) and never goes
-# through pass 2, since there is no justification to verify. Left
-# unchanged in the 2026-09-29 update (see module docstring) since it
-# affects a negligible fraction of rows and is deliberately kept minimal.
+# through pass 2, since there is no justification to verify.
 
 FORCE_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Answer with exactly one word, nothing else.\

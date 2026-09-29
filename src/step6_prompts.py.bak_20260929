@@ -17,21 +17,6 @@ SOURCED/JOURNALIST call and step 4b's 6-way source_category. `_source_phrase`
 below turns those two columns back into a short natural-language phrase to
 slot into the original sentence ("... is criticised by {source}."), so the
 prompt text itself is identical to before.
-
-2026-09-29 update: a 400-row gold-standard comparison found this the
-weakest field of the whole pipeline across two separate runs (~19% recall,
-unchanged despite unrelated fixes elsewhere). Reading the model's own
-justifications on the missed cases showed a consistent pattern: it only
-recognised a "response" when "{keyword}" itself spoke, immediately after
-the reproach, in words explicitly framed as a reply. It missed responses
-delivered by an official spokesperson or a subordinate service acting on
-"{keyword}"'s behalf, implicit defenses/justifications of the disputed
-decision that never use "response to criticism" phrasing, and responses
-that appear elsewhere in a long article rather than right next to the
-criticism. USER_TEMPLATE was expanded to define "response" more broadly
-along those three lines and to tell the model explicitly to read the whole
-article rather than just the vicinity of the reproach. No other prompt in
-this file was touched.
 """
 from __future__ import annotations
 import pandas as pd
@@ -50,10 +35,6 @@ ARTICLE:
 
 Your task is to determine whether, in the article, "{keyword}" gives a response \
 to the reproach addressed to them.
-
-Count as a response: a direct statement from "{keyword}" itself; a response given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, or defense of the decision or position being criticized, even if it is not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
-
-Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, or because another party unconnected to it comments on the criticism.
 
 First, in one sentence, briefly justify your answer based solely on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\

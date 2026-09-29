@@ -7,10 +7,31 @@ the criticism into one of 6 broad categories — replacing the old pipeline's
 attempt to pin down the exact person, which is no longer needed now that
 only the broad group matters.
 
-The category definitions (SYSTEM_PROMPT) are UNCHANGED — only the user
-template now asks for a one-sentence justification before the final
-category label, so the model names who it thinks is speaking before
-committing to a category (same pattern as steps 3, 4a, 5 and 6).
+2026-09-29 update: a 400-row gold-standard comparison, plus the user's own
+review of the full-corpus category distribution, found two related
+problems with the original category definitions (now revised below):
+  - "Civil Servant" was defined too narrowly (state employee speaking in a
+    "personal/field capacity", illustrated only with a frontline example
+    like a police officer or nurse). In practice, named officials speaking
+    about their own institution's affairs -- an agency director, an
+    auditor, a diplomat -- were being pushed elsewhere (often into
+    "Administrative Unit of the State" or, when neither felt like a clean
+    fit, into "Other") instead of into "Civil Servant", even though they
+    are exactly the kind of named state employee this category is meant
+    to cover.
+  - "Other" was being over-used as a catch-all whenever the model was not
+    confident an actor cleanly matched one of the five specific
+    categories, rather than as a last resort.
+The fix is a clearer, mutually-exclusive rule for telling "Administrative
+Unit of the State" (the institution itself, or an anonymous/unattributed
+statement made in its name) apart from "Civil Servant" (a specific NAMED
+individual employed by the state, personally quoted -- about a field
+matter or about institutional affairs, doesn't matter, as long as they are
+not an elected/appointed political figure), an explicit instruction not to
+default to "Other" out of uncertainty, and a short set of contrastive
+examples grounded in the kind of cases that were actually observed being
+misclassified. The user template's "identify who is speaking, then
+classify" pattern is otherwise unchanged.
 """
 from __future__ import annotations
 import pandas as pd
@@ -23,22 +44,55 @@ Your task is to classify those actors into ONE of the following categories.
 
 === CATEGORIES ===
 
-  Interest Group                     — any company, association, union, lobby, or other
-                                        external organisation defending its own specific
-                                        interest and speaking in its own name.
-  Civil Servant                      — a state employee speaking in a personal/field
-                                        capacity rather than on behalf of their institution
-                                        (e.g. a police officer's or nurse's firsthand account).
+  Interest Group                     — a company, association, union, lobby group, or other
+                                        organisation acting in its own economic or advocacy
+                                        interest and speaking in its own name (not a state
+                                        body).
+  Civil Servant                      — a specific NAMED individual employed by or acting on
+                                        behalf of the state (an official, agency director,
+                                        auditor, diplomat, police officer, expert, etc.) who
+                                        is personally quoted or interviewed giving their own
+                                        account or opinion -- whether about a hands-on/field
+                                        matter or about their institution's affairs, it makes
+                                        no difference -- as long as they are not an elected or
+                                        appointed political figure, and the criticism is
+                                        presented as their own personal statement rather than
+                                        a formal position issued in the institution's name.
   General Public                     — an ordinary citizen quoted with no other role,
                                         title, or affiliation.
   Politician                         — an elected or appointed political figure from any
                                         party (e.g. a state councillor, federal councillor,
                                         national councillor, member of parliament).
-  Administrative Unit of the State   — a department, administrative unit, or regulatory
-                                        agency of the state that is itself the source of
-                                        the criticism (e.g. another department, an
-                                        oversight body).
-  Other                              — none of the above categories apply.
+  Administrative Unit of the State   — the criticism is presented as coming from the
+                                        institution itself, not from a named individual: an
+                                        official report, audit, investigation, communiqué, or
+                                        unattributed statement issued in the name of a
+                                        department, administrative unit, or regulatory agency
+                                        (e.g. "the Finance Delegation's report states...",
+                                        "the Federal Audit Office found...").
+  Other                              — use ONLY when the criticizing actor is anonymous with
+                                        no institution named either, is a media outlet or
+                                        journalist acting as the source in their own right
+                                        (not merely reporting someone else's criticism), is a
+                                        foreign government or foreign organisation, or
+                                        otherwise clearly does not match any category above.
+                                        Do NOT use Other merely because the actor's exact role
+                                        feels ambiguous or hard to pin down -- in that case,
+                                        pick the closest matching category using the rules
+                                        above instead.
+
+A few contrastive examples to fix the Administrative Unit / Civil Servant boundary,
+the main source of confusion:
+  - A financial audit office's official report criticizes a project -> Administrative Unit
+    of the State (the institution itself, via an unattributed report, is the source).
+  - The retired former director of that same audit office gives a personal interview
+    about the same case -> Civil Servant (a specific named individual's own account).
+  - The head of a federal procurement agency explains or defends a decision in an
+    interview, under their own name -> Civil Servant, not Administrative Unit of the
+    State, because it is a named person speaking personally, not an anonymous statement
+    issued in the institution's name.
+  - An unnamed "source close to the department", with no institution or individual
+    identified -> Other.
 
 If several actors are quoted and they belong to different categories, choose the
 category of whichever actor's criticism is most central to the article.\
@@ -68,10 +122,10 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
 # article. See src/verify_utils.py for why this second pass exists.
 #
 # Unlike step 3/4a/5/6 (binary choice), this is a 6-way classification --
-# the verify system prompt repeats the full category legend (unchanged
-# from SYSTEM_PROMPT above) so the second pass has the same category
-# boundaries to work with, even though it only sees a one-sentence
-# description instead of the article. ---
+# the verify system prompt repeats the full category legend (kept in sync
+# with SYSTEM_PROMPT above, including the 2026-09-29 revision) so the
+# second pass has the same category boundaries to work with, even though
+# it only sees a one-sentence description instead of the article. ---
 
 VERIFY_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Another analyst has already read a
@@ -82,23 +136,39 @@ actor it describes into ONE of the following categories.
 
 === CATEGORIES ===
 
-  Interest Group                     — any company, association, union, lobby, or other
-                                        external organisation defending its own specific
-                                        interest and speaking in its own name.
-  Civil Servant                      — a state employee speaking in a personal/field
-                                        capacity rather than on behalf of their institution
-                                        (e.g. a police officer's or nurse's firsthand account).
+  Interest Group                     — a company, association, union, lobby group, or other
+                                        organisation acting in its own economic or advocacy
+                                        interest and speaking in its own name (not a state
+                                        body).
+  Civil Servant                      — a specific NAMED individual employed by or acting on
+                                        behalf of the state (an official, agency director,
+                                        auditor, diplomat, police officer, expert, etc.) who
+                                        is personally quoted or interviewed giving their own
+                                        account or opinion -- whether about a hands-on/field
+                                        matter or about their institution's affairs, it makes
+                                        no difference -- as long as they are not an elected or
+                                        appointed political figure, and the criticism is
+                                        presented as their own personal statement rather than
+                                        a formal position issued in the institution's name.
   General Public                     — an ordinary citizen quoted with no other role,
                                         title, or affiliation.
   Politician                         — an elected or appointed political figure from any
                                         party (e.g. a state councillor, federal councillor,
                                         national councillor, member of parliament).
-  Administrative Unit of the State   — a department, administrative unit, or regulatory
-                                        agency of the state that is itself the source of
-                                        the criticism (e.g. another department, an
-                                        oversight body).
-  Other                              — none of the above categories clearly apply, or the
-                                        description does not clearly identify an actor.\
+  Administrative Unit of the State   — the criticism is presented as coming from the
+                                        institution itself, not from a named individual: an
+                                        official report, audit, investigation, communiqué, or
+                                        unattributed statement issued in the name of a
+                                        department, administrative unit, or regulatory agency
+                                        (e.g. "the Finance Delegation's report states...",
+                                        "the Federal Audit Office found...").
+  Other                              — use ONLY when the description does not clearly
+                                        identify an actor, points to an anonymous source with
+                                        no institution named, a media outlet or journalist
+                                        acting as the source in their own right, or a foreign
+                                        government or organisation. Do NOT use Other merely
+                                        because the actor's exact role feels ambiguous -- pick
+                                        the closest matching category above instead.\
 """
 
 VERIFY_USER_TEMPLATE = """\
@@ -124,7 +194,9 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
 # to stop a row from being silently dropped, not to produce a reasoned
 # judgment. Any row answered this way is flagged via source_category_forced
 # = "TRUE" (see scripts/step4b_source_category.py) and never goes through
-# pass 2, since there is no justification to verify.
+# pass 2, since there is no justification to verify. Left unchanged in the
+# 2026-09-29 update since it affects a small fraction of rows and is
+# deliberately kept minimal.
 
 FORCE_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Answer with exactly one category name, nothing else.\
