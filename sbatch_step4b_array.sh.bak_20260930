@@ -1,12 +1,12 @@
 #!/bin/bash -l
-#SBATCH --job-name=step6_array
+#SBATCH --job-name=step4b_array
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=logs/step6_array_%A_%a.out
-#SBATCH --error=logs/step6_array_%A_%a.err
+#SBATCH --output=logs/step4b_array_%A_%a.out
+#SBATCH --error=logs/step4b_array_%A_%a.err
 #SBATCH --mail-user=maxime.kaiser@unil.ch
 #SBATCH --mail-type=END,FAIL
 #SBATCH --array=0-8   # 9 taches (0-8)
@@ -23,8 +23,8 @@ WORKDIR=/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO
 
 # I/O
 # Input = fichier fusionne produit par l'etape precedente
-INPUT=${1:-"${WORKDIR}/data/output/step5_merged/results.parquet"}
-OUTPUT_BASE=${WORKDIR}/data/output/step6
+INPUT=${1:-"${WORKDIR}/data/output/step4a_merged/results.parquet"}
+OUTPUT_BASE=${WORKDIR}/data/output/step4b
 TEXT_COL=text
 N_ROWS=0        # 0 = toutes les lignes ; mettre ex. 100 pour un test rapide
 
@@ -34,19 +34,25 @@ DTYPE=bf16
 BACKEND=transformers
 
 # Inference
-BATCH_SIZE=4
-MAX_NEW_TOKENS=150      # YES/NO + une phrase de justification
+BATCH_SIZE=8
+MAX_NEW_TOKENS=90     # justification (1 phrase) + categorie (la plus longue = 'Administrative Unit of the State')
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 
 # Pass 2 (verify) -- reads only the pass-1 justification, not the article,
 # so it needs a much smaller batch/context than pass 1 above.
 VERIFY_BATCH_SIZE=16
-VERIFY_MAX_NEW_TOKENS=8
+VERIFY_MAX_NEW_TOKENS=12
 VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
 
-NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step6_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
+# Pass 1 retries + last-resort force -- every eligible row is now supposed
+# to come out of this step with a real answer (see src/verify_utils.py and
+# the retry/force block in the script). Same mechanism as step4a/step3.
+DRAFT_MAX_RETRIES=2
+RETRY_TEMPERATURE=0.4
+
+NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
 
 # =============================================================================
 
@@ -63,8 +69,8 @@ mkdir -p logs data/output
 # -- Auto-chain : task 0 soumet le merge des le debut (SLURM attend que TOUTES les taches reussissent) --
 if [[ "${SLURM_ARRAY_TASK_ID:-}" == "0" ]]; then
     sbatch --dependency=afterok:${SLURM_ARRAY_JOB_ID} \
-        "${WORKDIR}/sbatch_merge_step6.sh" "${SLURM_ARRAY_JOB_ID}"
-    echo "[chain] Submitted sbatch_merge_step6.sh (dependency: afterok:${SLURM_ARRAY_JOB_ID})"
+        "${WORKDIR}/sbatch_merge_step4b.sh" "${SLURM_ARRAY_JOB_ID}"
+    echo "[chain] Submitted sbatch_merge_step4b.sh (dependency: afterok:${SLURM_ARRAY_JOB_ID})"
 fi
 
 echo "=== SLURM ARRAY ==="
@@ -80,8 +86,9 @@ echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
+echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
 
-python scripts/step6_admin_response.py \
+python scripts/step4b_source_category.py \
   --input             "$INPUT" \
   --output_base       "$OUTPUT_BASE" \
   --text_col          "$TEXT_COL" \
@@ -98,6 +105,8 @@ python scripts/step6_admin_response.py \
   --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
   --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
+  --draft_max_retries       "$DRAFT_MAX_RETRIES" \
+  --retry_temperature       "$RETRY_TEMPERATURE" \
   --num_tasks         "$NUM_TASKS"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 

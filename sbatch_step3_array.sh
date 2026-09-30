@@ -61,7 +61,7 @@ VERIFY_TEMPERATURE=0.0
 DRAFT_MAX_RETRIES=2
 RETRY_TEMPERATURE=0.4
 
-NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
+NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step3_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
 # =============================================================================
 

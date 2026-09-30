@@ -16,42 +16,25 @@ version keeps the same core binary question but:
     matching straight to a label (same "reasoning before conclusion"
     pattern already used in step 6, now applied consistently everywhere).
 
-2026-09-29 update (superseded by the 2026-09-30 rewrite below): a 400-row
-gold comparison had found two roughly opposite error patterns -- false
-positives from treating neutral statements as criticism, and false
-negatives from refusing to attribute criticism of a project/subordinate
-unit to the entity responsible for it. Two separate rules with four
-examples were bolted onto USER_TEMPLATE to address each.
-
-2026-09-30 rewrite: running that version against the gold standard showed
-the two bolted-on rules did not hold up well together. Reading the model's
-own justifications on the new errors it introduced showed two concrete
-failure modes: (a) the model would write a hedged justification ("this
-could be seen as...", "this implies...") and then answer YES anyway --
-telling it in the abstract not to do this didn't stop it, because nothing
-about the OUTPUT FORMAT forced it to ground the answer in the text; (b) the
-"attributable responsibility" rule was sometimes used to launder a
-criticism of a genuinely different actor onto "{keyword}" through a chain
-of reasoning ("{keyword} is responsible for this dossier, so criticism of
-the other party's failure counts as criticism of {keyword}"). One case
-showed outright self-contradictory reasoning (the model's own justification
-said a criticism was "not directed at {keyword} itself" and then answered
-YES), a sign that stacking a second rule with its own examples on top of
-the first was making the prompt harder for an 8B model to apply coherently
-rather than easier.
-
-Rather than adding a third rule, USER_TEMPLATE below is restructured as a
-single two-step procedure ("find the actual reproach, then check who it
-targets") that the model must work through and report on, in order. This
-folds both 2026-09-29 rules into the same structure instead of stacking
-them, drops the four separate examples down to two short inline ones, and
-replaces the abstract "don't hedge" instruction with a concrete format
-requirement: the justification must name the specific reproach found (or
-say plainly that none was found), which gives the model much less room to
-reach YES from a hedge. The responsibility-laundering failure is addressed
-by naming the exact pattern to exclude ("even if '{keyword}' is simply
-mentioned nearby as being involved, informed, or in charge of following
-up") rather than by adding a new rule.
+2026-09-29 update: after the 09/28 fix to the missing-answer rate (see the
+force-prompt block below) let more rows through to a real judgment, a
+400-row gold-standard comparison surfaced two roughly opposite error
+patterns in the answered rows:
+  (a) false positives -- the model treats a neutral, factual, or merely
+      "could-be-read-negatively" statement about "{keyword}" (a forecast,
+      a statistic, a plain description of a decision) as if it were
+      criticism, effectively constructing the reproach itself rather than
+      finding one already made in the text;
+  (b) false negatives -- when a reproach explicitly targets a project,
+      program, or subordinate unit that is clearly "{keyword}"'s own
+      responsibility (e.g. a procurement project run by a department), the
+      model refuses to count it as criticism of "{keyword}" because
+      "{keyword}" itself is not named in the reproach.
+Two explicit rules (with short contrastive examples) were added to
+USER_TEMPLATE to address both patterns together, since fixing one in
+isolation risked making the other worse. FORCE_USER_TEMPLATE (the no-
+justification last-resort prompt, used for a negligible fraction of rows)
+was deliberately left unchanged to keep it minimal.
 
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
@@ -64,9 +47,8 @@ SYSTEM_PROMPT = """\
 You are a media analysis assistant specialised in Swiss public affairs.
 You read a newspaper article and judge whether one specific, named entity
 is criticized in it. Be careful to distinguish an entity being criticized
-from an entity that is itself doing the criticizing, one that is simply
-mentioned in a neutral context, and a reproach that actually targets
-someone else entirely.\
+from an entity that is itself doing the criticizing, or one that is simply
+mentioned in a neutral or unrelated context.\
 """
 
 USER_TEMPLATE = """\
@@ -75,15 +57,21 @@ In the article below, focus specifically on "{keyword}".
 ARTICLE:
 {article_text}
 
-Determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Do not confuse this with "{keyword}" being the one expressing criticism of someone or something else, or with "{keyword}" being only mentioned in passing.
+Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
 
-Work through these two checks, in order:
+Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
 
-1. Point to the actual reproach. Find the specific sentence(s) where someone -- a journalist, a quoted source, a political actor, etc. -- expresses a real reproach, negative judgment, accusation, or denunciation. A neutral fact, a forecast, a statistic, or a plain description of a decision is NOT a reproach by itself, even if it could be read negatively. If you cannot point to an actual reproach in the text, the answer is NO.
+Two further rules to apply carefully:
 
-2. Check who the reproach targets. It counts as criticism of "{keyword}" when the reproach names "{keyword}" directly, or targets a project, program, decision, or subordinate unit that is clearly "{keyword}"'s own direct responsibility (e.g. a procurement project run by a department is attributable to that department, even if the reproach names the project or a supplier instead). It does NOT count when the reproach targets a genuinely separate actor -- another department, a foreign government, a private company, a parliamentary committee's own conduct -- even if "{keyword}" is simply mentioned nearby as being involved, informed, or in charge of following up. If the reproach targets someone else, the answer is NO.
+1. Require an actual, explicit expression of criticism -- a reproach, a negative judgment, a denunciation, an accusation -- made by someone (a journalist, a quoted source, a political actor, etc.) in the text. A neutral fact, a forecast, a statistic, or a plain description of an action or decision attributed to "{keyword}" is NOT criticism by itself, even if a reader could imagine a negative reading of it. If you find yourself constructing the criticism from a neutral statement rather than finding one already made in the text, the answer is NO.
+   Example (NOT criticism -> NO): "{keyword} forecasts a budget deficit of 3 billion next year." This is a neutral statement, not a reproach.
+   Example (criticism -> YES): "Critics accuse {keyword} of hiding the true scale of the deficit." Here someone explicitly makes a reproach.
 
-First, in one sentence, state the specific reproach you found (or say plainly that you found none) and who it targets. Do not use hedging language such as "could be seen as" or "implies" -- if that is all you can say, the answer is NO.
+2. Count as criticism of "{keyword}" not only reproaches that name it directly, but also reproaches aimed at a project, program, decision, or subordinate unit that clearly falls under its direct responsibility (e.g. a procurement project run by a department is attributable to that department, even if the reproach names the project or a supplier instead of the department itself). Do NOT extend this to criticism of a clearly separate and independent actor (another department, a parliamentary committee simply commenting, a private third party) that does not act under "{keyword}"'s authority.
+   Example (attributable -> YES): a parliamentary finance committee denounces cost overruns and delays in a defense-equipment project run by the ministry. This counts as criticism of the ministry.
+   Example (not attributable -> NO): a parliamentary committee's own conduct is criticized, or a private contractor is blamed for a defect with no reproach directed at the ministry's own decisions.
+
+First, in one sentence, briefly justify your answer based on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
@@ -131,8 +119,8 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
 # judgment. Any row answered this way is flagged via keyword_answer_forced
 # = "TRUE" (see scripts/step3_criticism_detection.py) and never goes
 # through pass 2, since there is no justification to verify. Left
-# unchanged through the 2026-09-29 and 2026-09-30 updates since it affects
-# a negligible fraction of rows and is deliberately kept minimal.
+# unchanged in the 2026-09-29 update (see module docstring) since it
+# affects a negligible fraction of rows and is deliberately kept minimal.
 
 FORCE_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Answer with exactly one word, nothing else.\

@@ -46,7 +46,7 @@ VERIFY_MAX_NEW_TOKENS=8
 VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
 
-NUM_TASKS=9   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches)
+NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step5_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
 # =============================================================================
 
