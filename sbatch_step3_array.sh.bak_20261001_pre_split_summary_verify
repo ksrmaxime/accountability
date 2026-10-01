@@ -48,18 +48,11 @@ MAX_INPUT_TOKENS=24576  # releve de 16384 : marge de securite supplementaire pou
                         # le relais pour au moins preserver la consigne finale du prompt
 TEMPERATURE=0.0
 
-# Pass 2 (verify) -- reads only the pass-1 output, not the article, so it
-# still needs a much smaller batch/context than pass 1 above. Note
-# (2026-10-01): since the summary+verify split, pass 2's own prompt now
-# carries the *entire* criticism definition and all 8 worked examples
-# (src/step3_prompts.py VERIFY_SYSTEM_PROMPT + VERIFY_USER_TEMPLATE), not
-# just a two-line question -- that fixed text alone is already close to
-# 1000 tokens. VERIFY_MAX_INPUT_TOKENS raised from 512 to 2048 accordingly
-# (512 would silently truncate the verify prompt mid-definition, which
-# would not error out but would quietly degrade every verify-pass answer).
+# Pass 2 (verify) -- reads only the pass-1 justification, not the article,
+# so it needs a much smaller batch/context than pass 1 above.
 VERIFY_BATCH_SIZE=16
 VERIFY_MAX_NEW_TOKENS=8
-VERIFY_MAX_INPUT_TOKENS=2048
+VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
 
 # Pass 1 retries + last-resort force -- every eligible row is now supposed
