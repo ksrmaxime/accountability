@@ -1,0 +1,157 @@
+# src/step3_prompts.py
+"""
+STEP 3 — criticism detection.
+
+Originally ported 1:1 from the legacy src/run3_prompts.py with the wording
+left untouched. After a real full run, two problems showed up in the actual
+results: (1) no justification was captured at all, so a wrong answer could
+not be diagnosed, and (2) the model sometimes seems to flag "{keyword}" as
+YES when it is actually the one doing the criticizing (or merely mentioned
+near criticism of something else), not the one being criticized. This
+version keeps the same core binary question but:
+  - explicitly tells the model not to confuse "{keyword} is criticized"
+    with "{keyword} is the one criticizing",
+  - asks for a one-sentence justification BEFORE the final YES/NO answer,
+    to force the small model to reason about the text instead of pattern-
+    matching straight to a label (same "reasoning before conclusion"
+    pattern already used in step 6, now applied consistently everywhere).
+
+2026-09-29 update (superseded by the 2026-09-30 rewrite below): a 400-row
+gold comparison had found two roughly opposite error patterns -- false
+positives from treating neutral statements as criticism, and false
+negatives from refusing to attribute criticism of a project/subordinate
+unit to the entity responsible for it. Two separate rules with four
+examples were bolted onto USER_TEMPLATE to address each.
+
+2026-09-30 rewrite: running that version against the gold standard showed
+the two bolted-on rules did not hold up well together. Reading the model's
+own justifications on the new errors it introduced showed two concrete
+failure modes: (a) the model would write a hedged justification ("this
+could be seen as...", "this implies...") and then answer YES anyway --
+telling it in the abstract not to do this didn't stop it, because nothing
+about the OUTPUT FORMAT forced it to ground the answer in the text; (b) the
+"attributable responsibility" rule was sometimes used to launder a
+criticism of a genuinely different actor onto "{keyword}" through a chain
+of reasoning ("{keyword} is responsible for this dossier, so criticism of
+the other party's failure counts as criticism of {keyword}"). One case
+showed outright self-contradictory reasoning (the model's own justification
+said a criticism was "not directed at {keyword} itself" and then answered
+YES), a sign that stacking a second rule with its own examples on top of
+the first was making the prompt harder for an 8B model to apply coherently
+rather than easier.
+
+Rather than adding a third rule, USER_TEMPLATE below is restructured as a
+single two-step procedure ("find the actual reproach, then check who it
+targets") that the model must work through and report on, in order. This
+folds both 2026-09-29 rules into the same structure instead of stacking
+them, drops the four separate examples down to two short inline ones, and
+replaces the abstract "don't hedge" instruction with a concrete format
+requirement: the justification must name the specific reproach found (or
+say plainly that none was found), which gives the model much less room to
+reach YES from a hedge. The responsibility-laundering failure is addressed
+by naming the exact pattern to exclude ("even if '{keyword}' is simply
+mentioned nearby as being involved, informed, or in charge of following
+up") rather than by adding a new rule.
+
+`matched_alias` is still used instead of the canonical `keyword` for the
+same reason as before: it's the literal term step 2 found in *this*
+article's own text.
+"""
+from __future__ import annotations
+import pandas as pd
+
+SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+You read a newspaper article and judge whether one specific, named entity
+is criticized in it. Be careful to distinguish an entity being criticized
+from an entity that is itself doing the criticizing, one that is simply
+mentioned in a neutral context, and a reproach that actually targets
+someone else entirely.\
+"""
+
+USER_TEMPLATE = """\
+In the article below, focus specifically on "{keyword}".
+
+ARTICLE:
+{article_text}
+
+Determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Do not confuse this with "{keyword}" being the one expressing criticism of someone or something else, or with "{keyword}" being only mentioned in passing.
+
+Work through these two checks, in order:
+
+1. Point to the actual reproach. Find the specific sentence(s) where someone -- a journalist, a quoted source, a political actor, etc. -- expresses a real reproach, negative judgment, accusation, or denunciation. A neutral fact, a forecast, a statistic, or a plain description of a decision is NOT a reproach by itself, even if it could be read negatively. If you cannot point to an actual reproach in the text, the answer is NO.
+
+2. Check who the reproach targets. It counts as criticism of "{keyword}" when the reproach names "{keyword}" directly, or targets a project, program, decision, or subordinate unit that is clearly "{keyword}"'s own direct responsibility (e.g. a procurement project run by a department is attributable to that department, even if the reproach names the project or a supplier instead). It does NOT count when the reproach targets a genuinely separate actor -- another department, a foreign government, a private company, a parliamentary committee's own conduct -- even if "{keyword}" is simply mentioned nearby as being involved, informed, or in charge of following up. If the reproach targets someone else, the answer is NO.
+
+First, in one sentence, state the specific reproach you found (or say plainly that you found none) and who it targets. Do not use hedging language such as "could be seen as" or "implies" -- if that is all you can say, the answer is NO.
+Then, on a new line, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_user_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
+
+
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of whether a specific
+entity is criticized in it. You are not shown the article itself -- your
+only task is to read that explanation and decide which final answer it
+supports.\
+"""
+
+VERIFY_USER_TEMPLATE = """\
+The question was: is "{keyword}" criticized in the article?
+
+Here is the explanation given by the other analyst:
+"{justification}"
+
+Based solely on this explanation, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)
+
+
+# --- Last resort (force): a bare one-word decision, no justification asked
+# for at all, used only for rows that still have no parseable pass-1 answer
+# after every retry of the full prompt above. Mirrors step4a's own force
+# prompt (src/step4a_prompts.py) -- deliberately minimal, the goal is just
+# to stop a row from being silently dropped, not to produce a reasoned
+# judgment. Any row answered this way is flagged via keyword_answer_forced
+# = "TRUE" (see scripts/step3_criticism_detection.py) and never goes
+# through pass 2, since there is no justification to verify. Left
+# unchanged through the 2026-09-29 and 2026-09-30 updates since it affects
+# a negligible fraction of rows and is deliberately kept minimal.
+
+FORCE_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Answer with exactly one word, nothing else.\
+"""
+
+FORCE_USER_TEMPLATE = """\
+In the article below, focus specifically on "{keyword}".
+
+ARTICLE:
+{article_text}
+
+Is "{keyword}" ITSELF being criticized in this article -- for who it is or what it did or decided?
+
+Answer with exactly one word: YES or NO.\
+"""
+
+
+def build_force_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return FORCE_USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
