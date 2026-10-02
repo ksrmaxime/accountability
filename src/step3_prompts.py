@@ -16,67 +16,64 @@ version keeps the same core binary question but:
     matching straight to a label (same "reasoning before conclusion"
     pattern already used in step 6, now applied consistently everywhere).
 
-2026-09-29 and 2026-09-30 updates (both superseded below): a 400-row gold
-comparison found two roughly opposite error patterns in pass 1 -- false
-positives from treating neutral statements as criticism, and false
-negatives from refusing to attribute criticism of a project/subordinate
-unit to the entity responsible for it. Two rounds of changes tried to fix
-both by making pass 1's own definition of "criticized" progressively more
-complete (first two rules bolted on with examples, then a single
-restructured definition with examples for every case). Neither improved
-on the original version; each one was measured, on the same 400 gold
-rows, to perform slightly *worse* than the one before it on every
-precision/accuracy/F1/kappa metric.
+Two-pass design (added after the justification-first run showed the label
+sometimes contradicting its own justification -- see src/verify_utils.py):
 
-2026-10-01, three changes in the same day:
+  Pass 1 (draft)  — reads the article, writes the justification, then a
+    first-guess label right after it. Both are kept: the justification
+    under `keyword_justification`, the first-guess label under
+    `keyword_answer_draft` (QA only).
+  Pass 2 (verify) — reads ONLY `keyword_justification` (no article) and
+    classifies it into YES/NO. This is the FINAL label, saved as
+    `keyword_answer` — the name every downstream step's mask uses.
 
-  (a) First rewrite: kept the one-pass-does-everything structure, but
-  tried to fold the two edge cases into the core definition itself rather
-  than bolting rules onto it, with one example per distinguished case
-  instead of only for the edge cases. This still underperformed the
-  original version, by a similar margin to the previous two attempts.
+This is the version that measured best on the 400-row gold comparison
+(job65205108: accuracy=75.7%, precision=56.4%, recall=78.8%, F1=65.7%,
+kappa=0.478).
 
-  (b) Second rewrite: a closer look at *why* three different rewrites of
-  pass 1's definition all failed the same way pointed at the two-pass
-  split itself, not the wording. Measured directly: pass 2 (verify) has
-  stayed reliable and, if anything, gotten slightly *more* accurate at
-  its one job (correcting an over-eager pass-1 answer) across every
-  version tested so far -- it is pass 1 whose answers got less stable as
-  its own instructions grew longer and more complex (9.8%->13.8%
-  draft/final disagreement between the original version and the previous
-  rewrite). So this version moved the whole criticism definition -- edge
-  cases, all 8 examples -- out of pass 1 entirely and into pass 2. Pass 1
-  became a factual, two-sentence-max summary of what the article says
-  about "{keyword}", with no mention of criticism; pass 2 now applies the
-  full definition to that summary instead of to a self-written
-  justification.
+2026-09-29/30 and 2026-10-01 updates (all superseded below): three rounds
+of rewrites tried to fix two error patterns found in job65205108 -- (a)
+false negatives when the thing actually criticized is a policy/project/
+decision rather than "{keyword}" named directly, and (b) false positives
+from reading a neutral or merely-factual statement as criticism. Every one
+of these rewrites (two rounds of bolted-on exclusion rules in pass 1, one
+unified-definition rewrite, and finally a full architectural change moving
+the whole definition into a much longer pass 2 applied to a plain factual
+summary instead of the article) measured *worse* than job65205108 on every
+metric, the last one by a wide margin (job65277505: recall collapsed to
+11.9% because pass 2 was asked to make the entire judgment, cold, under an
+8-token budget with no room to reason -- see that run's analysis). A
+manual review of all its false negatives also showed the pass-1 summary
+itself was the bigger single cause (around 55% of cases), not just pass 2:
+an unguided 1-2 sentence summary written by a small model tends to pick the
+article's most generic facet rather than searching for a reproach that may
+sit elsewhere in a long article.
 
-  (c) This rewrite (current): pass 1's summary instruction is simplified
-  further. The previous version still told pass 1 not to use words like
-  "criticize/reproach/accuse/denounce" and still asked for a trailing
-  YES/NO ("did you find something concrete to report"). Neither is
-  needed: pass 1's question has nothing to do with criticism any more, so
-  there is no reason to expect it to reach for that vocabulary on its
-  own, and a content-sufficiency YES/NO added a step with no clear
-  purpose. USER_TEMPLATE now asks the one plain question directly, with
-  nothing else attached.
-
-  This does remove the trailing label pass 1 used to produce, which
-  `scripts/step3_criticism_detection.py`'s `parse_draft_output` used to
-  require (via `src/verify_utils.py:parse_draft_labeled`) before accepting
-  a response at all -- a response with no parseable YES/NO used to be
-  treated as a full failure and retried. That function expects a
-  judgment-style output, which pass 1 deliberately no longer produces, so
-  `parse_draft_output` in the script was rewritten to accept any
-  non-empty response directly as the summary. See that script's own
-  comments for the detail; no other prompts.py file needed to change for
-  this.
-
-  Operational note (carried over from (b), still applies): pass 2's
-  prompt is much longer than before the summary/verify split (the full
-  definition + 8 examples, versus a two-line question) -- the sbatch
-  script's --verify_max_input_tokens was raised from 512 to 2048
-  accordingly (sbatch_step3_array.sh, not this file).
+2026-10-02, reverted + reinforced: back to the exact job65205108
+architecture and wording below (full article in pass 1, one-sentence
+justification + YES/NO label, pass 2 verifies that justification alone),
+on the reasoning that job65205108's remaining errors are worth fixing
+*from* its own wording rather than by replacing it again. Rather than
+re-adding exclusion rules to pass 1 (the thing that made every later
+rewrite worse -- a precise list of NO-cases reads, in practice, as "if a
+case isn't on this list, it's YES"), this version adds a small, genuinely
+balanced set of worked examples to each pass, calibrating both directions
+at once instead of only warning against false positives or only against
+false negatives:
+  - Pass 1 gets three YES examples and three NO examples illustrating the
+    SYSTEM_PROMPT's own existing distinction (criticized vs. criticizing,
+    vs. merely mentioned), including one case of institutional
+    responsibility (a project/policy run by the entity) so that pattern
+    isn't systematically missed -- but as one example among six balanced
+    ones, not as a dedicated bolted-on rule.
+  - Pass 2's job is unchanged (classify the pass-1 justification alone,
+    still without the article) and its prompt is still the short, simple
+    original -- but it now gets a few worked examples specifically aimed
+    at job65205108's main false-positive pattern: a justification that
+    only speculates or infers a reproach ("this could be seen as...",
+    "this suggests that...", "one might read this as...") without
+    describing an actual one, which should be corrected to NO even when
+    the justification's own stated conclusion was YES.
 
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
@@ -87,17 +84,32 @@ import pandas as pd
 
 SYSTEM_PROMPT = """\
 You are a media analysis assistant specialised in Swiss public affairs.
-You read a newspaper article and report what it says about one specific
-named entity.\
+You read a newspaper article and judge whether one specific, named entity
+is criticized in it. Be careful to distinguish an entity being criticized
+from an entity that is itself doing the criticizing, or one that is simply
+mentioned in a neutral or unrelated context.\
 """
 
 USER_TEMPLATE = """\
-In the article below, "{keyword}" is mentioned.
+In the article below, focus specifically on "{keyword}".
 
 ARTICLE:
 {article_text}
 
-In one or two sentences, what does the article say about "{keyword}", or about what they did?\
+Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
+
+Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
+
+For example:
+- "A parliamentary committee accuses the ministry of mismanaging a defense procurement project it runs, citing cost overruns." -> the ministry IS criticized: the reproach targets a project that is its own direct responsibility, even though the ministry itself is not named.
+- "Critics say the mayor's housing policy has worsened the rent crisis in the city." -> the mayor IS criticized: a clear reproach targets her decision.
+- "\"The agency has been negligent and failed to act in time,\" the auditor's report states." -> the agency IS criticized: a direct, explicit reproach.
+- "The agency reports a 3% increase in applications this year." -> NOT criticized: a plain neutral fact, no reproach is expressed.
+- "The minister dismisses the opposition's proposal as unrealistic." -> the minister is NOT criticized: here the minister is the one doing the criticizing, not the target.
+- "The report notes that the department was informed of the problem and tasked with following up." -> NOT criticized: being informed or involved is not itself a reproach.
+
+First, in one sentence, briefly justify your answer based on the article.
+Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
 
@@ -108,44 +120,32 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
 
 
-# --- Pass 2 (verify): the entire criticism judgment lives here. Reads
-# ONLY the pass-1 summary (never the article) and applies the full
-# definition -- see module docstring for why this moved out of pass 1. ---
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
 
 VERIFY_SYSTEM_PROMPT = """\
-You are a media analysis assistant specialised in Swiss public affairs.
-Another analyst has read a newspaper article and written a short, purely
-factual summary of what it says about one specific named entity --
-without judging whether this amounts to criticism. You are not shown the
-article itself. Your task is to read that summary and decide, applying
-the definition below, whether the entity is criticized. Be careful to
-distinguish an entity that is actually criticized from one that is itself
-doing the criticizing, one that is simply mentioned in a neutral context,
-and one that is only mentioned nearby a reproach that in fact targets
-someone else entirely.\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of whether a specific
+entity is criticized in it. You are not shown the article itself -- your
+only task is to read that explanation and decide which final answer it
+supports.\
 """
 
 VERIFY_USER_TEMPLATE = """\
-The entity in question is "{keyword}".
+The question was: is "{keyword}" criticized in the article?
 
-Here is a neutral, factual summary of what the article says about "{keyword}", written by another analyst who did not judge whether this counts as criticism:
+Here is the explanation given by the other analyst:
 "{justification}"
 
-"{keyword}" is criticized when the summary describes an actual reproach, negative judgment, accusation, or denunciation -- made by a journalist, a quoted source, a political actor, or anyone else -- that targets either "{keyword}" by name, or a project, program, decision, or subordinate unit that is clearly "{keyword}"'s own, current, direct responsibility (for instance a procurement project run by a department, even when the reproach names the project or a supplier rather than the department itself).
+Judge what the explanation actually describes, not just which label it ends with: an explanation that only speculates or infers a possible reproach, without describing one that is actually made in the article, does not support YES even if it concludes with YES.
 
-"{keyword}" is NOT criticized when any of the following is true: the summary only reports a neutral fact, forecast, statistic, or plain description of a decision, with no reproach actually expressed, even if it could be read negatively; "{keyword}" is the one expressing criticism of someone or something else rather than the target of it; the reproach targets a genuinely separate actor -- another department, a foreign government, a private company, a parliamentary committee's own conduct, or a predecessor who held the role before "{keyword}" took over -- even if "{keyword}" is simply mentioned nearby as being informed, associated, or in charge of following up, without being blamed directly; or the summary merely reports a policy disagreement or a contested position ("{keyword}" defends a stance some find wrong), without anyone actually reproaching "{keyword}" for wrongdoing or failure.
+For example:
+- "The report could be seen as implying criticism of the agency." -> NO: this only speculates about a possible reading, it does not describe an actual reproach.
+- "One might infer that the minister's policy is being questioned here." -> NO: an inference, not a reported criticism.
+- "The committee explicitly accuses the ministry of mismanaging the project." -> YES: a concrete, actual reproach is described.
+- "The article neutrally reports the agency's budget figures, with no reproach mentioned." -> NO: nothing to verify, no criticism is described.
 
-Examples covering the full range of cases above:
-- "The ministry forecasts a budget deficit of 3 billion next year." -> NOT criticism: a neutral statement, no reproach expressed.
-- "Critics accuse the ministry of hiding the true scale of the deficit." -> Criticism of the ministry: an explicit reproach naming it directly.
-- "{keyword} denounces the opposition's handling of the file." -> NOT criticism of "{keyword}": here "{keyword}" is the one criticizing, not the target.
-- "A parliamentary committee denounces cost overruns and delays in a defense-equipment project run by the ministry." -> Criticism of the ministry: the project is its own direct, current responsibility, even though the ministry itself is not named.
-- "A private contractor is blamed for a manufacturing defect; no reproach is made against the ministry's own decisions." -> NOT criticism of the ministry: the reproach targets a genuinely separate actor.
-- "The ministry is mentioned as having been informed of the problem and tasked with following up." -> NOT criticism: mere involvement or being informed is not itself a reproach.
-- "The cost overrun was decided two years before {keyword} took office, under their predecessor." -> NOT criticism of "{keyword}": the decision belongs to a separate actor in time, not to their own current responsibility.
-- "Some lawmakers disagree with {keyword}'s support for the free-trade deal." -> NOT criticism: a policy disagreement about a position is not a reproach for wrongdoing.
-
-Based solely on this summary, answer with exactly one word: YES or NO.\
+Based solely on this explanation, answer with exactly one word: YES or NO.\
 """
 
 
@@ -157,17 +157,13 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
 
 
 # --- Last resort (force): a bare one-word decision, no justification asked
-# for at all, used only for rows that still have no usable pass-1 summary
-# after every retry of the prompt above. Mirrors step4a's own force
-# prompt (src/step4a_prompts.py) -- deliberately minimal, the goal is just
-# to stop a row from being silently dropped, not to produce a reasoned
-# judgment. Any row answered this way is flagged via keyword_answer_forced
-# = "TRUE" (see scripts/step3_criticism_detection.py) and never goes
-# through pass 2, since there is no summary to verify. Left asking the
-# criticism question directly (unlike the new pass 1) because there is no
-# pass 2 left to apply the full definition for these rows -- this is a
-# blunt last resort, not a reasoned judgment, same as every earlier
-# version of this file.
+# for at all, used only for rows that still have no usable pass-1 answer
+# after every retry. Mirrors step4a's own force prompt (src/step4a_prompts.py)
+# -- deliberately minimal, the goal is just to stop a row from being
+# silently dropped, not to produce a reasoned judgment. Any row answered
+# this way is flagged via keyword_answer_forced = "TRUE" (see
+# scripts/step3_criticism_detection.py) and never goes through pass 2.
+# Unchanged across every rewrite this file has had.
 
 FORCE_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Answer with exactly one word, nothing else.\
