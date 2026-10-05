@@ -75,27 +75,6 @@ false negatives:
     describing an actual one, which should be corrected to NO even when
     the justification's own stated conclusion was YES.
 
-2026-10-05, pass 2 simplified back to the bare original: job65304761
-(the run with the reinforced pass 2 above) measured accuracy=77.5% but
-F1=53.1%/recall=43.2%, well below job65205108 (F1=65.7%/recall=78.8%).
-Comparing `keyword_answer_draft` (pass 1) to the final `keyword_answer`
-isolated the cause precisely: pass 2 flipped 110 of 400 rows from YES to
-NO (and 0 the other way), but only 63 of those 110 flips were correct
-(gold=NO) -- the other 47 overturned a genuine gold=YES row into a false
-negative. Recomputed with pass 1's own draft kept as the final answer
-(no pass 2 at all), the run already reaches F1=64.9%/recall=83.1% --
-almost exactly job65205108's level -- which means pass 1 with its new
-balanced examples (added 2026-10-02, kept below) was not the problem: the
-4 worked examples added to pass 2 above were. Those examples equated the
-mere presence of a hedging word ("implies", "suggests") with baseless
-speculation deserving NO, but pass 1 also uses that same vocabulary to
-report a real, if indirectly-worded, criticism -- and this gold standard
-itself frequently labels an implicit criticism as YES. Pass 2's
-VERIFY_USER_TEMPLATE below has been reverted to the bare original
-question with no worked examples at all; VERIFY_SYSTEM_PROMPT was never
-changed and stays as-is. Pass 1 (SYSTEM_PROMPT/USER_TEMPLATE) is
-unchanged from 2026-10-02 below.
-
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -157,6 +136,14 @@ The question was: is "{keyword}" criticized in the article?
 
 Here is the explanation given by the other analyst:
 "{justification}"
+
+Judge what the explanation actually describes, not just which label it ends with: an explanation that only speculates or infers a possible reproach, without describing one that is actually made in the article, does not support YES even if it concludes with YES.
+
+For example:
+- "The report could be seen as implying criticism of the agency." -> NO: this only speculates about a possible reading, it does not describe an actual reproach.
+- "One might infer that the minister's policy is being questioned here." -> NO: an inference, not a reported criticism.
+- "The committee explicitly accuses the ministry of mismanaging the project." -> YES: a concrete, actual reproach is described.
+- "The article neutrally reports the agency's budget figures, with no reproach mentioned." -> NO: nothing to verify, no criticism is described.
 
 Based solely on this explanation, answer with exactly one word: YES or NO.\
 """
