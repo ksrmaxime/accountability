@@ -96,28 +96,6 @@ question with no worked examples at all; VERIFY_SYSTEM_PROMPT was never
 changed and stays as-is. Pass 1 (SYSTEM_PROMPT/USER_TEMPLATE) is
 unchanged from 2026-10-02 below.
 
-2026-10-06, pass 1 reinforced against false positives: a manual review of
-all 75 false positives from job65448158 (where gold=NO but Apertus said
-YES) found that ~78% of them were not hallucinations but a target-
-attribution failure -- Apertus correctly noticed something negative,
-difficult, or conflictual in the article but pinned it on "{keyword}"
-instead of verifying who it actually applied to. Three recurring shapes:
-(a) a real criticism in the article targets a different, specific person/
-institution/decision, and gets re-attached to "{keyword}" because it
-appears nearby (~37% of the 75 cases, the largest single pattern); (b)
-"{keyword}" merely faces a difficult or negative situation (tension, an
-unpopular task, being the victim of a fraud) with nobody in the text
-blaming it for that situation (~25%); (c) "{keyword}" states its own
-position or decision and that gets read as the entity being criticized
-for it (~16%). Rather than adding a list of exclusion cases (the approach
-already shown to backfire -- see 2026-09-29/30/2026-10-01 above), this
-adds one clarifying sentence to SYSTEM_PROMPT operationalising "criticized"
-as fault attributed directly to this entity, plus a single new balanced
-YES/NO example pair in USER_TEMPLATE targeting pattern (a), the most
-frequent one. Pass 2 (VERIFY_SYSTEM_PROMPT/VERIFY_USER_TEMPLATE) and the
-force prompt are both left unchanged -- see Accountability_step3_FP_pattern_
-analysis_job65448158.md for the full case-by-case classification.
-
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -130,13 +108,7 @@ You are a media analysis assistant specialised in Swiss public affairs.
 You read a newspaper article and judge whether one specific, named entity
 is criticized in it. Be careful to distinguish an entity being criticized
 from an entity that is itself doing the criticizing, or one that is simply
-mentioned in a neutral or unrelated context. Only answer YES if the article
-itself attributes fault, blame, failure, or wrongdoing directly to this
-specific entity: an entity that merely faces a difficult or negative
-situation, carries out its normal role, is cited as a neutral source,
-states its own position or decision, or is mentioned near criticism that
-explicitly targets a different, specific person, institution, or policy,
-is not itself being criticized.\
+mentioned in a neutral or unrelated context.\
 """
 
 USER_TEMPLATE = """\
@@ -156,8 +128,6 @@ For example:
 - "The agency reports a 3% increase in applications this year." -> NOT criticized: a plain neutral fact, no reproach is expressed.
 - "The minister dismisses the opposition's proposal as unrealistic." -> the minister is NOT criticized: here the minister is the one doing the criticizing, not the target.
 - "The report notes that the department was informed of the problem and tasked with following up." -> NOT criticized: being informed or involved is not itself a reproach.
-- "\"The agency's own negligence and repeated failures to act allowed the crisis to worsen,\" the audit concludes." -> the agency IS criticized: the fault is placed directly on the agency itself, not merely on the situation.
-- "A parliamentary committee criticizes a new government savings package; the office that helped carry out part of it is only mentioned as having implemented measures decided elsewhere." -> the office is NOT criticized: the criticism targets the package/decision, not this office, which is not itself named as being at fault.
 
 First, in one sentence, briefly justify your answer based on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\
