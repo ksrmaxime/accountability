@@ -32,23 +32,6 @@ criticism. USER_TEMPLATE was expanded to define "response" more broadly
 along those three lines and to tell the model explicitly to read the whole
 article rather than just the vicinity of the reproach. No other prompt in
 this file was touched.
-
-2026-10-07 update: despite the above, a fresh 400-row gold comparison
-(job65468999 chain) still found this the weakest of steps 4a/5/6 (62.3%),
-with 25 of 29 errors all missed YES cases, and nearly every justification
-using the same "no direct response" wording -- the model still seems to be
-looking for something stronger than what often counts. The qualifying
-clause is widened again: acknowledging the problem, promising to fix or
-review it, or minimizing its importance now explicitly count as a response,
-alongside the explanation/justification/defense already covered. The
-exclusion clause is also widened to rule out the opposite failure seen in
-this round's 4 false positives: the article merely reporting that
-"{keyword}" acted, changed course, or came under pressure is explicitly NOT
-a response unless "{keyword}" (or its spokesperson) actually said something
-about it. Given this field was already broadened once before with no
-measured gain, this change should be checked against the next run rather
-than assumed to fix it -- see also the separate, not-yet-done review of
-whether the GOLD labels for this field are themselves reliable.
 """
 from __future__ import annotations
 import pandas as pd
@@ -68,9 +51,9 @@ ARTICLE:
 Your task is to determine whether, in the article, "{keyword}" gives a response \
 to the reproach addressed to them.
 
-Count as a response: a direct statement from "{keyword}" itself; a statement given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, defense, acknowledgment of the problem, promise to fix or review it, or attempt to minimize its importance, regarding the decision or situation being criticized -- even if that statement is brief, general, or not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
+Count as a response: a direct statement from "{keyword}" itself; a response given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, or defense of the decision or position being criticized, even if it is not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
 
-Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, because another party unconnected to it comments on the criticism, or because the article merely reports that "{keyword}" took some action, changed course, or came under pressure, without "{keyword}" (or its spokesperson) actually saying anything about it.
+Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, or because another party unconnected to it comments on the criticism.
 
 First, in one sentence, briefly justify your answer based solely on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\

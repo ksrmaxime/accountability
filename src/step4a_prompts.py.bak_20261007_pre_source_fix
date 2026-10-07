@@ -16,16 +16,6 @@ Fix: make the model search for and name a candidate actor FIRST (forcing it
 to actually engage with the text), and only then commit to the SOURCED /
 JOURNALIST label on a separate line -- the same justification-before-answer
 pattern used everywhere else in this pipeline.
-
-2026-10-07 update: a 400-row gold comparison (job65468999 chain) found two
-error patterns. (1) The model often names "{keyword}" itself as the actor
-making the criticism whenever it is named as the one who took the
-decision/action being criticized, even though it is the TARGET of the
-criticism, not its source -- USER_TEMPLATE now explicitly excludes this.
-(2) A handful of pass-2 flips turned a clearly-SOURCED justification (e.g.
-one that just names an organization) into a final JOURNALIST answer --
-VERIFY_USER_TEMPLATE's SOURCED line now explicitly covers a bare named
-actor, not only a full quotation.
 """
 from __future__ import annotations
 import pandas as pd
@@ -45,7 +35,7 @@ In the article below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Look for a specific person, organization, or institution that is quoted, named, or clearly identified as making this criticism (for example: a named politician, an interest group, another authority, a civil servant, or a member of the public). "{keyword}" itself does not count as that actor just because it is named as the one who made the decision, took the action, or is otherwise the subject of the criticism -- the actor you are looking for is whoever is voicing or levelling the criticism, not the one the criticism targets.
+Look for a specific person, organization, or institution that is quoted, named, or clearly identified as making this criticism (for example: a named politician, an interest group, another authority, a civil servant, or a member of the public).
 
 First, in one sentence, say who -- if anyone -- is identified as making the criticism, or state that no specific actor is identified.
 Then, on a new line, answer with exactly one word:
@@ -79,7 +69,7 @@ Here is the explanation given by the other analyst:
 "{justification}"
 
 Based solely on this explanation, answer with exactly one word:
-SOURCED — if the explanation names, quotes, or otherwise identifies any specific actor making the criticism, even briefly or without a full quotation.
+SOURCED — if the explanation names or identifies a specific actor making the criticism.
 JOURNALIST — if the explanation says no specific actor is identified.\
 """
 

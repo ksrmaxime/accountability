@@ -118,6 +118,31 @@ frequent one. Pass 2 (VERIFY_SYSTEM_PROMPT/VERIFY_USER_TEMPLATE) and the
 force prompt are both left unchanged -- see Accountability_step3_FP_pattern_
 analysis_job65448158.md for the full case-by-case classification.
 
+2026-10-07, pass 2 reinforced for the "policy vs. entity" contradiction:
+job65468999 (the pass-1 fix above) measured accuracy=80.0%/F1=66.1% raw
+against gold, but a manual re-verification of every row that changed
+(Maxime's own recoding, confirming the gold standard itself is noisy --
+only 21.7% reliable on the specific pattern of implicit/indirect
+criticism) produced a corrected accuracy=86.5%/F1=74.0% -- the best
+result on this pipeline to date, with only 13 confirmed false negatives
+and 41 confirmed false positives left. Of those 13 FN, 6 (46%) share one
+exact, recurring shape: pass 1's own justification already names the
+criticism as targeting this entity's own policy, decision, or project,
+then wrongly concludes NO because it reads that as "the policy, not the
+entity." SYSTEM_PROMPT's own first worked example already treats this as
+YES ("the ministry IS criticized: the reproach targets a project that is
+its own direct responsibility") but pass 1 isn't generalising it to every
+phrasing. Rather than touching pass 1 again (two edits to it already
+had side effects -- see 2026-10-06 above), this adds one narrow, single
+worked example to pass 2's VERIFY_USER_TEMPLATE that corrects exactly
+this self-contradiction using only the justification text pass 2 already
+has (no need to reread the article): when the justification itself says
+the criticism targets the entity's own policy/decision/project rather
+than the entity, answer YES anyway. This is deliberately scoped to that
+one signature and should not interact with the other FN/FP mechanisms
+(target misattribution, role reversal, missed reading) which account for
+the rest of the remaining errors.
+
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -188,7 +213,12 @@ The question was: is "{keyword}" criticized in the article?
 Here is the explanation given by the other analyst:
 "{justification}"
 
-Based solely on this explanation, answer with exactly one word: YES or NO.\
+Based solely on this explanation, answer with exactly one word: YES or NO.
+
+For example: "The criticism targets the ministry's own decision to proceed
+with the project despite known issues, not the ministry itself." -> YES:
+a policy, decision, or project run by this entity is its own
+responsibility, so this counts as "{keyword}" being criticized.\
 """
 
 

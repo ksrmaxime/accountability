@@ -13,19 +13,6 @@ JOURNALIST.
 The category definitions (SYSTEM_PROMPT) are UNCHANGED — only the user
 template now asks for a one-sentence justification before the final
 POLICY/ENTITY label (same pattern as steps 3, 4a, 4b and 6).
-
-2026-10-07 update: a 400-row gold comparison (job65468999 chain) found the
-model's two error directions were roughly balanced (ENTITY mistaken for
-POLICY and vice versa), both traceable to the same cause -- the old "Key
-signal" wording let the model decide ENTITY vs POLICY by whether a specific
-policy/decision/project was merely nameable in the text, rather than by
-what the criticism itself was about. That let "poor execution of a named
-project" get called POLICY, and "a specific, nameable decision described in
-behaviour/competence language" get called ENTITY. SYSTEM_PROMPT and
-VERIFY_SYSTEM_PROMPT both replace the old per-category "Key signal" lines
-with one shared test: content/wisdom of the choice -> POLICY, quality of
-execution/delivery/communication -> ENTITY, regardless of whether a project
-or policy is named as the backdrop.
 """
 from __future__ import annotations
 import pandas as pd
@@ -40,19 +27,18 @@ Your task is to classify the NATURE of this criticism into ONE of two categories
   Entity  — the criticism targets the target ITSELF: its behaviour, competence,
             efficiency, management, integrity, morality, or a personal or
             institutional scandal involving it or the people who run it.
+            Key signal: no specific named policy, decision, or proposal is
+            being criticized — the attack is on WHO the target is or HOW it
+            behaves/performs, even if that behaviour has political consequences.
 
   Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
             CHOICE: a named bill, reform, regulation, budget, decision, or
             proposal the target is responsible for.
+            Key signal: you could name the specific policy or decision being
+            criticized.
 
-A specific policy, decision, or project being named in the article does NOT
-by itself make this POLICY: the decisive question is what the criticism is
-actually about. If it is about the CONTENT or WISDOM of the choice itself --
-whether a different decision should have been made -- answer POLICY. If it
-is about HOW WELL the target carried it out (delays, errors, poor
-communication, lack of transparency, incompetence, failure to enforce or
-deliver), answer ENTITY, even though a specific policy, decision, or project
-is the backdrop of that criticism.\
+If the article criticizes both the target's policy choices AND its behaviour
+or competence, choose whichever is the more central focus of the criticism.\
 """
 
 USER_TEMPLATE = """\
@@ -93,15 +79,7 @@ criticism it describes into ONE of two categories.
 
   Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
             CHOICE: a named bill, reform, regulation, budget, decision, or
-            proposal the target is responsible for.
-
-A specific policy, decision, or project being named in the explanation does
-NOT by itself make this POLICY: judge what the criticism is actually about.
-If it is about the CONTENT or WISDOM of the choice itself, answer POLICY. If
-it is about HOW WELL the target carried it out (delays, errors, poor
-communication, lack of transparency, incompetence, failure to enforce or
-deliver), answer ENTITY, even if a specific policy, decision, or project is
-mentioned as the backdrop.\
+            proposal the target is responsible for.\
 """
 
 VERIFY_USER_TEMPLATE = """\
