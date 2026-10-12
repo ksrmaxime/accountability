@@ -35,6 +35,18 @@ one-sentence qualifier inside the "Civil Servant" step itself instead of a
 separate examples block -- there is no longer a standalone "contrastive
 examples" section to keep in sync with the category definitions. The user
 template's "identify who is speaking, then classify" pattern is unchanged.
+
+2026-10-12 update: the corrected 800-row gold (job65610203) found this
+step's errors clustering around inconsistent handling of articles where
+several actors from different categories are quoted -- the model tends to
+settle on whichever actor it notices first rather than checking the full
+ordered hierarchy against every actor present, and SYSTEM_PROMPT's own
+"most central" tie-break (a subjective criterion with no fixed order) was
+likely reinforcing that. The tie-break is replaced with an explicit
+instruction to enumerate every criticizing actor across the whole article
+first, then apply categories 1-6 in order to that full set. No change to
+the six category definitions themselves or to VERIFY_SYSTEM_PROMPT/
+VERIFY_USER_TEMPLATE, which never had this tie-break sentence.
 """
 from __future__ import annotations
 import pandas as pd
@@ -84,8 +96,11 @@ one that fits -- do not skip ahead.
    genuinely matches nothing above. Do not use Other merely because the
    actor's exact role feels ambiguous -- work through categories 1-5 first.
 
-If several actors are quoted and they belong to different categories,
-classify the one whose criticism is most central to the article.\
+If several actors are quoted, first identify every actor across the WHOLE
+article who criticizes the target, then apply categories 1-6 IN ORDER to
+that full set of actors -- the lowest-numbered category that fits ANY of
+them wins, even if a different actor was quoted first or more
+prominently.\
 """
 
 USER_TEMPLATE = """\

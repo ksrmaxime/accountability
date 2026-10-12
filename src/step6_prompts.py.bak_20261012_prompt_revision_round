@@ -1,0 +1,142 @@
+# src/step6_prompts.py
+"""
+STEP 6 — admin response: does the target respond to the criticism directed
+at it?
+
+Ported from the legacy run7 stage with the SYSTEM_PROMPT wording untouched.
+The USER_TEMPLATE's final two instructions were reordered (justification
+now comes before the YES/NO answer instead of after) for consistency with
+steps 3, 4a, 4b and 5, which all now use the same "justification first"
+pattern — the sentence-level wording of both instructions is otherwise
+unchanged. The other real change is how the `{source}` slot is filled: the
+legacy pipeline had a free-text
+`critic_answer_final` column (an open-ended "who criticizes?" answer,
+arbitrated/validated through run4arbitre + run5). That column does not exist
+in this pipeline — it has been replaced by step 4a's binary
+SOURCED/JOURNALIST call and step 4b's 6-way source_category. `_source_phrase`
+below turns those two columns back into a short natural-language phrase to
+slot into the original sentence ("... is criticised by {source}."), so the
+prompt text itself is identical to before.
+
+2026-09-29 update: a 400-row gold-standard comparison found this the
+weakest field of the whole pipeline across two separate runs (~19% recall,
+unchanged despite unrelated fixes elsewhere). Reading the model's own
+justifications on the missed cases showed a consistent pattern: it only
+recognised a "response" when "{keyword}" itself spoke, immediately after
+the reproach, in words explicitly framed as a reply. It missed responses
+delivered by an official spokesperson or a subordinate service acting on
+"{keyword}"'s behalf, implicit defenses/justifications of the disputed
+decision that never use "response to criticism" phrasing, and responses
+that appear elsewhere in a long article rather than right next to the
+criticism. USER_TEMPLATE was expanded to define "response" more broadly
+along those three lines and to tell the model explicitly to read the whole
+article rather than just the vicinity of the reproach. No other prompt in
+this file was touched.
+
+2026-10-07 update: despite the above, a fresh 400-row gold comparison
+(job65468999 chain) still found this the weakest of steps 4a/5/6 (62.3%),
+with 25 of 29 errors all missed YES cases, and nearly every justification
+using the same "no direct response" wording -- the model still seems to be
+looking for something stronger than what often counts. The qualifying
+clause is widened again: acknowledging the problem, promising to fix or
+review it, or minimizing its importance now explicitly count as a response,
+alongside the explanation/justification/defense already covered. The
+exclusion clause is also widened to rule out the opposite failure seen in
+this round's 4 false positives: the article merely reporting that
+"{keyword}" acted, changed course, or came under pressure is explicitly NOT
+a response unless "{keyword}" (or its spokesperson) actually said something
+about it. Given this field was already broadened once before with no
+measured gain, this change should be checked against the next run rather
+than assumed to fix it -- see also the separate, not-yet-done review of
+whether the GOLD labels for this field are themselves reliable.
+"""
+from __future__ import annotations
+import pandas as pd
+
+SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+Your task is to determine whether, in a newspaper article, the entity being
+criticised responds to the criticism/reproach directed at them.\
+"""
+
+USER_TEMPLATE = """\
+In the article below, "{keyword}" is criticised by {source}.
+
+ARTICLE:
+{article_text}
+
+Your task is to determine whether, in the article, "{keyword}" gives a response \
+to the reproach addressed to them.
+
+Count as a response: a direct statement from "{keyword}" itself; a statement given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, defense, acknowledgment of the problem, promise to fix or review it, or attempt to minimize its importance, regarding the decision or situation being criticized -- even if that statement is brief, general, or not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
+
+Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, because another party unconnected to it comments on the criticism, or because the article merely reports that "{keyword}" took some action, changed course, or came under pressure, without "{keyword}" (or its spokesperson) actually saying anything about it.
+
+First, in one sentence, briefly justify your answer based solely on the article.
+Then, on a new line, answer with exactly one word: YES or NO.\
+"""
+
+# step 4b source_category -> natural-language phrase, in the register of the
+# original free-text critic_answer_final values it replaces.
+_CATEGORY_PHRASES = {
+    "Interest Group": "an interest group",
+    "Civil Servant": "a civil servant",
+    "General Public": "a member of the general public",
+    "Politician": "a politician",
+    "Administrative Unit of the State": "another administrative unit of the state",
+    "Other": "an external actor",
+}
+
+
+def _source_phrase(row: pd.Series) -> str:
+    attribution = row.get("source_attribution", pd.NA)
+    attribution = "" if pd.isna(attribution) else str(attribution).strip().upper()
+
+    if attribution == "JOURNALIST":
+        return "the journalist"
+
+    if attribution == "SOURCED":
+        category = row.get("source_category", pd.NA)
+        category = "" if pd.isna(category) else str(category).strip()
+        return _CATEGORY_PHRASES.get(category, "an unspecified source")
+
+    # source_attribution missing/unparsed (should not normally happen since
+    # step 4a covers every keyword_answer == "YES" row) -> fall back exactly
+    # like the legacy code did when critic_answer_final was NA.
+    return "an unspecified source"
+
+
+def build_user_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    source = _source_phrase(row)
+    return USER_TEMPLATE.format(keyword=keyword, article_text=article_text, source=source)
+
+
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of whether a specific
+target responds to a criticism directed at it. You are not shown the
+article itself -- your only task is to read that explanation and decide
+which final answer it supports.\
+"""
+
+VERIFY_USER_TEMPLATE = """\
+The question was: does "{keyword}" give a response to the criticism/reproach directed at them?
+
+Here is the explanation given by the other analyst:
+"{justification}"
+
+Based solely on this explanation, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)

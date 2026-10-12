@@ -118,6 +118,23 @@ frequent one. Pass 2 (VERIFY_SYSTEM_PROMPT/VERIFY_USER_TEMPLATE) and the
 force prompt are both left unchanged -- see Accountability_step3_FP_pattern_
 analysis_job65448158.md for the full case-by-case classification.
 
+2026-10-12, calibrated against the corrected 800-row gold (job65610203,
+post manual-recode spot-check): the same two dominant shapes persist on
+this larger, partly-unseen set, now characterized more precisely. FPs: a
+negative fact about the entity -- a vote lost, a fraud it was the victim
+of, a cost figure, a finding about an entity it merely oversees or is
+overseen by -- still gets read as fault rather than fact. FNs: an official
+report or oversight body explicitly attributing a failure to the entity
+itself is still sometimes treated as "the entity was merely investigated/
+mentioned" rather than "the entity was found at fault". Given this file's
+own history of pass 2 regressing when given new worked examples
+(2026-10-05 above), pass 2 is left untouched again; only pass 1 changes:
+one sentence added to SYSTEM_PROMPT operationalising the FP pattern
+directly, and one new balanced worked example added to USER_TEMPLATE for
+the FN report/oversight pattern. Recommend validating this round in
+isolation before combining with the same-day step4a/4b/5/6 changes, given
+how narrowly this step's prompt has had to be calibrated in the past.
+
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -136,7 +153,10 @@ specific entity: an entity that merely faces a difficult or negative
 situation, carries out its normal role, is cited as a neutral source,
 states its own position or decision, or is mentioned near criticism that
 explicitly targets a different, specific person, institution, or policy,
-is not itself being criticized.\
+is not itself being criticized. A negative fact about this entity -- a loss
+it suffered, a vote it lost, costs it incurred, or a finding made about an
+entity it merely oversees or that oversees it -- is not criticism of this
+entity unless the article itself says this entity is at fault for it.\
 """
 
 USER_TEMPLATE = """\
@@ -158,6 +178,7 @@ For example:
 - "The report notes that the department was informed of the problem and tasked with following up." -> NOT criticized: being informed or involved is not itself a reproach.
 - "\"The agency's own negligence and repeated failures to act allowed the crisis to worsen,\" the audit concludes." -> the agency IS criticized: the fault is placed directly on the agency itself, not merely on the situation.
 - "A parliamentary committee criticizes a new government savings package; the office that helped carry out part of it is only mentioned as having implemented measures decided elsewhere." -> the office is NOT criticized: the criticism targets the package/decision, not this office, which is not itself named as being at fault.
+- "The parliamentary oversight delegation's report states that the agency failed to apply its own control procedures, which allowed the overspending to go undetected." -> the agency IS criticized: an official oversight report explicitly attributes a concrete failure to the agency itself, not merely to the situation it was overseeing.
 
 First, in one sentence, briefly justify your answer based on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\

@@ -26,6 +26,20 @@ VERIFY_SYSTEM_PROMPT both replace the old per-category "Key signal" lines
 with one shared test: content/wisdom of the choice -> POLICY, quality of
 execution/delivery/communication -> ENTITY, regardless of whether a project
 or policy is named as the backdrop.
+
+2026-10-12 update: the corrected 800-row gold (job65610203) found the
+2026-10-07 fix above has partly backfired -- 38 ENTITY->POLICY errors show
+justifications that literally echo "policy choice" to justify POLICY, the
+exact lexical shortcut that edit tried to eliminate, now apparently
+reinforcing it instead (confirmed via draft-vs-final: 26/38 already wrong
+at pass 1). SYSTEM_PROMPT and VERIFY_SYSTEM_PROMPT now add an explicit
+warning against deciding from the word "policy"/"choice"/"decision"
+itself, and reformulate the test as a counterfactual: would the criticism
+disappear if the target had executed this flawlessly? (yes -> ENTITY,
+no -> POLICY). USER_TEMPLATE also gets its first worked example (this
+step previously had none, unlike steps 3/4a/4b/6) illustrating the ENTITY
+side of that test, since the backdrop-execution confusion is the larger
+and clearer of the two error directions.
 """
 from __future__ import annotations
 import pandas as pd
@@ -46,13 +60,15 @@ Your task is to classify the NATURE of this criticism into ONE of two categories
             proposal the target is responsible for.
 
 A specific policy, decision, or project being named in the article does NOT
-by itself make this POLICY: the decisive question is what the criticism is
-actually about. If it is about the CONTENT or WISDOM of the choice itself --
-whether a different decision should have been made -- answer POLICY. If it
-is about HOW WELL the target carried it out (delays, errors, poor
-communication, lack of transparency, incompetence, failure to enforce or
-deliver), answer ENTITY, even though a specific policy, decision, or project
-is the backdrop of that criticism.\
+by itself make this POLICY, and neither does your own justification simply
+using the words "policy", "choice", or "decision" -- the decisive question
+is what the criticism is actually about. Ask yourself: if the target had
+executed this flawlessly, would the criticism disappear? If yes, the
+criticism is about delivery, competence, or communication -> answer ENTITY,
+even though a specific policy, decision, or project is the backdrop. If the
+criticism would remain even with flawless execution -- because critics
+object to the content or wisdom of the choice itself, and a different
+decision should have been made -- answer POLICY.\
 """
 
 USER_TEMPLATE = """\
@@ -62,6 +78,10 @@ ARTICLE:
 {article_text}
 
 Is this criticism about a specific PUBLIC POLICY choice made by "{keyword}", or about "{keyword}" as an ENTITY (its behaviour, competence, efficiency, integrity, or a personal/institutional scandal)?
+
+Naming a specific policy, project, or decision does not by itself decide the answer -- ask: would the criticism disappear if "{keyword}" had executed it flawlessly? If yes, this is ENTITY. If the criticism would remain even with flawless execution, this is POLICY.
+
+For example: "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months." -> ENTITY: the criticism targets how poorly the program was run, not whether the subsidy itself was the right choice -- flawless execution would have resolved it.
 
 First, in one sentence, justify your answer based on the article.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
@@ -96,12 +116,13 @@ criticism it describes into ONE of two categories.
             proposal the target is responsible for.
 
 A specific policy, decision, or project being named in the explanation does
-NOT by itself make this POLICY: judge what the criticism is actually about.
-If it is about the CONTENT or WISDOM of the choice itself, answer POLICY. If
-it is about HOW WELL the target carried it out (delays, errors, poor
-communication, lack of transparency, incompetence, failure to enforce or
-deliver), answer ENTITY, even if a specific policy, decision, or project is
-mentioned as the backdrop.\
+NOT by itself make this POLICY, and neither does the explanation simply
+using the words "policy", "choice", or "decision" -- judge what the
+criticism is actually about. Ask: would the criticism disappear if the
+target had executed this flawlessly? If yes, answer ENTITY, even if a
+specific policy, decision, or project is mentioned as the backdrop. If the
+criticism would remain even with flawless execution -- because it targets
+the content or wisdom of the choice itself -- answer POLICY.\
 """
 
 VERIFY_USER_TEMPLATE = """\

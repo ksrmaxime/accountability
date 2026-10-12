@@ -49,6 +49,20 @@ about it. Given this field was already broadened once before with no
 measured gain, this change should be checked against the next run rather
 than assumed to fix it -- see also the separate, not-yet-done review of
 whether the GOLD labels for this field are themselves reliable.
+
+2026-10-12 update: on the corrected 800-row gold (job65610203), step 6 is
+still the pipeline's weakest field (recall 42.7%), and 58% of its false
+negatives are pass-1-correct YES answers flipped to NO by pass 2 -- the
+same cross-cutting pattern confirmed in step 4a the same day. The root
+cause here is sharper: VERIFY_USER_TEMPLATE never restated what counts as
+a "response" at all, unlike USER_TEMPLATE above -- pass 2 was deciding
+YES/NO on a bare justification with none of the broadened definition
+(spokesperson statements, indirect/third-person defenses, minimization,
+etc.) that pass 1 uses. VERIFY_USER_TEMPLATE now restates that same
+definition and, as in step 4a above, asks pass 2 to first quote the
+specific words/acts it is treating as a response (or "none") before
+answering. VERIFY_MAX_NEW_TOKENS was raised from 8 to 40 in
+sbatch_step6_array.sh for the same reason as step 4a.
 """
 from __future__ import annotations
 import pandas as pd
@@ -126,12 +140,14 @@ which final answer it supports.\
 """
 
 VERIFY_USER_TEMPLATE = """\
-The question was: does "{keyword}" give a response to the criticism/reproach directed at them?
+The question was: does "{keyword}" give a response to the criticism/reproach directed at them? Count as a response: a direct statement from "{keyword}" itself; a statement made on its behalf by a spokesperson or a subordinate unit acting under its authority; or any explanation, justification, defense, acknowledgment of the problem, promise to fix or review it, or attempt to minimize it, regarding the decision or situation being criticized -- even if brief, general, indirect, or narrated in the third person.
 
 Here is the explanation given by the other analyst:
 "{justification}"
 
-Based solely on this explanation, answer with exactly one word: YES or NO.\
+First, quote the specific words or acts in this explanation that constitute \
+such a response, if any -- answer "none" if there is none.
+Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
 

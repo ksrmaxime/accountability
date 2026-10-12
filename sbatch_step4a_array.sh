@@ -42,7 +42,7 @@ TEMPERATURE=0.0
 # Pass 2 (verify) -- reads only the pass-1 justification, not the article,
 # so it needs a much smaller batch/context than pass 1 above.
 VERIFY_BATCH_SIZE=16
-VERIFY_MAX_NEW_TOKENS=8
+VERIFY_MAX_NEW_TOKENS=40
 VERIFY_MAX_INPUT_TOKENS=512
 VERIFY_TEMPERATURE=0.0
 

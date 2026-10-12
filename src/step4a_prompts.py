@@ -26,6 +26,20 @@ criticism, not its source -- USER_TEMPLATE now explicitly excludes this.
 one that just names an organization) into a final JOURNALIST answer --
 VERIFY_USER_TEMPLATE's SOURCED line now explicitly covers a bare named
 actor, not only a full quotation.
+
+2026-10-12 update: a fresh breakdown on the corrected 800-row gold
+(job65610203) found the dominant error (gold=SOURCED, Apertus=JOURNALIST)
+is 73.5% self-contradictory -- pass 1's own draft already said SOURCED,
+and pass 2 flips it to JOURNALIST on the very same justification text,
+despite the 2026-10-07 SOURCED clarification above already telling it a
+bare named actor counts. Since the rule is already stated and still not
+reliably applied, VERIFY_USER_TEMPLATE now asks pass 2 to first quote the
+specific actor it finds (or "none") before committing to the label --
+the same justification-before-answer structure already used for pass 1,
+rather than more wording added to a rule that demonstrably isn't the
+bottleneck. This needs a larger verify token budget than the previous
+bare one-word answer; VERIFY_MAX_NEW_TOKENS was raised from 8 to 40 in
+sbatch_step4a_array.sh accordingly.
 """
 from __future__ import annotations
 import pandas as pd
@@ -78,7 +92,10 @@ The question was: is the criticism of "{keyword}" attributed to a specific, iden
 Here is the explanation given by the other analyst:
 "{justification}"
 
-Based solely on this explanation, answer with exactly one word:
+First, quote the specific name, title, or role of any actor this explanation \
+identifies as making or supporting the criticism, if any -- answer "none" if \
+there is none.
+Then, on a new line, answer with exactly one word:
 SOURCED — if the explanation names, quotes, or otherwise identifies any specific actor making the criticism, even briefly or without a full quotation.
 JOURNALIST — if the explanation says no specific actor is identified.\
 """
