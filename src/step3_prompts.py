@@ -181,7 +181,7 @@ For example:
 - "\"The agency's own negligence and repeated failures to act allowed the crisis to worsen,\" the audit concludes." -> the agency IS criticized: the fault is placed directly on the agency itself, not merely on the situation.
 - "A parliamentary committee criticizes a new government savings package; the office that helped carry out part of it is only mentioned as having implemented measures decided elsewhere." -> the office is NOT criticized: the criticism targets the package/decision, not this office, which is not itself named as being at fault.
 
-First, in one sentence, briefly justify your answer based on the article.
+First, in two sentences, briefly explain the context of the article which makes you think that there is or not a criticism against "{keyword}".
 Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
