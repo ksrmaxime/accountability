@@ -13,18 +13,36 @@ untouched in the output — this script only ever reads keyword_answer, it
 never overwrites it, and `source_attribution` stays NA for those rows.
 
 Two-pass design (added after the justification-first run showed the label
-sometimes contradicting its own justification — see src/verify_utils.py):
+sometimes contradicting its own justification — see src/verify_utils.py).
+
+2026-10-13: pass 2 removed. A draft-vs-final comparison on job65746412
+(800-row gold) found pass 2 purely harmful for this step: of the 7 rows it
+touched where pass 1 was already correct, all 7 were flipped to a WRONG
+final answer (0 corrections) -- draft accuracy 72.2% vs final 66.9% on
+that run. The mechanism: VERIFY_USER_TEMPLATE's SOURCED rule ("if the
+explanation names... any specific actor... even briefly") fires whenever
+pass 1's justification names the journalist by name (e.g. "attributed to
+the journalist, Larissa Rhyn"), which it does as a matter of routine
+style -- pass 2, never seeing the article, cannot tell that this named
+actor IS the journalist the SOURCED/JOURNALIST distinction exists to
+exclude. This is the same 2026-10-07/10-12 "bare named actor counts"
+clarification (see VERIFY_USER_TEMPLATE's own changelog in
+src/step4a_prompts.py) having overshot in the opposite direction. Pass 1's
+own draft label is now written straight to the final column below, with
+no second LLM call:
 
   Pass 1 (draft)  — reads the article, names who (if anyone) is making the
     criticism, then a first-guess SOURCED/JOURNALIST label right after it.
     Both are kept: the justification under `source_attribution_justification`,
-    the first-guess label under `source_attribution_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `source_attribution_justification` (no
-    article) and classifies it into SOURCED/JOURNALIST. This is the FINAL
-    label, saved as `source_attribution` — the name step 4b's mask uses.
+    the first-guess label under `source_attribution_draft`.
+    `source_attribution_draft` is then copied straight to
+    `source_attribution` (see the end of main(), just before Save).
+  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
+    and the --verify_* CLI args below are kept, unused, in case pass 2 is
+    revisited later.
 
-Output columns: source_attribution              -> "SOURCED" | "JOURNALIST" | NA  (final, pass 2)
-                source_attribution_draft         -> "SOURCED" | "JOURNALIST" | NA  (pass 1, QA only)
+Output columns: source_attribution              -> "SOURCED" | "JOURNALIST" | NA  (final = pass-1 draft, or forced)
+                source_attribution_draft         -> "SOURCED" | "JOURNALIST" | NA  (pass 1)
                 source_attribution_justification -> free text | NA                 (pass 1)
 
 Usage
@@ -318,27 +336,14 @@ def main() -> int:
             flush=True,
         )
 
-    # --- Pass 2: verify (final label, from the justification alone) ---
-    verify_cfg = RunConfig(
-        id_col="__index__",
-        text_col="source_attribution_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
-    )
-    df = run_llm_dataframe(
-        df=df,
-        cfg=verify_cfg,
-        client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["source_attribution_draft"].notna() & df_["source_attribution_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="source_attribution",
-        checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+    # --- Pass 2 removed (2026-10-13): see the docstring above for the full
+    # evidence (job65746412: draft accuracy 72.2% vs final 66.9%, 7/7
+    # pass-1-correct flips turned wrong, 0 corrected). Pass 1's own draft
+    # label is now the final answer: no further LLM call.
+    # `source_attribution_forced` rows already have `source_attribution` set
+    # from the force pass above and are left untouched by this fill.
+    df["source_attribution"] = df["source_attribution"].where(
+        df["source_attribution"].notna(), df["source_attribution_draft"]
     )
 
     # --- Save ALL rows ---

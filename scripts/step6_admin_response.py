@@ -16,19 +16,39 @@ description is now reconstructed from step 4a/4b's structured columns.
 Two-pass design (added after the justification-first run showed the label
 sometimes contradicting its own justification — see src/verify_utils.py).
 This step showed the worst case of the problem: of the rows labelled YES,
-40% had a justification that explicitly said no response was given. Splitting
-the two passes fixes exactly this:
+40% had a justification that explicitly said no response was given. Pass 2
+was added to fix exactly this.
+
+2026-10-13: pass 2 removed anyway. A draft-vs-final comparison on
+job65746412 (800-row gold) found pass 2 still net harmful despite the
+2026-10-12 fix documented above: on the 133-row evaluable population,
+draft recall is 72.1% vs final recall 46.2%, and pass 2 additionally turns
+32/133 rows (24%) into an unparseable NA that didn't exist in the draft --
+on a fair full-population basis (missing counted as wrong) draft accuracy
+is 62.9% vs final's 49.6%. All 15 of the pass-1-correct rows pass 2 touched
+were flipped to a WRONG final answer. The pattern: pass 1's justification
+almost always opens with the boilerplate "The article does not contain a
+direct response from X..." even on rows where its own label is (correctly)
+YES, because the actual response it found is implicit/indirect and never
+gets stated plainly in that opening sentence. Pass 2, never seeing the
+article, reads only that negative-sounding opening and defaults to NO --
+i.e. the two-pass design's premise (the justification is more reliable
+than the label) does not hold here: the label is usually the more
+reliable of the two. Pass 1's own draft label is now written straight to
+the final column below, with no second LLM call:
 
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess YES/NO label right after it. Both are kept: the
     justification under `admin_response_justification`, the first-guess
-    label under `admin_response_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `admin_response_justification` (no article)
-    and classifies it into YES/NO. This is the FINAL label, saved as
-    `admin_response`.
+    label under `admin_response_draft`. `admin_response_draft` is then
+    copied straight to `admin_response` (see the end of main(), just
+    before Save).
+  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
+    and the --verify_* CLI args below are kept, unused, in case pass 2 is
+    revisited later.
 
-Output columns: admin_response              -> "YES" | "NO" | NA  (final, pass 2)
-                admin_response_draft         -> "YES" | "NO" | NA  (pass 1, QA only)
+Output columns: admin_response              -> "YES" | "NO" | NA  (final = pass-1 draft)
+                admin_response_draft         -> "YES" | "NO" | NA  (pass 1)
                 admin_response_justification -> free text | NA     (pass 1)
 
 Usage
@@ -210,27 +230,13 @@ def main() -> int:
         checkpoint_every=50,
     )
 
-    # --- Pass 2: verify (final label, from the justification alone) ---
-    verify_cfg = RunConfig(
-        id_col="__index__",
-        text_col="admin_response_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
-    )
-    df = run_llm_dataframe(
-        df=df,
-        cfg=verify_cfg,
-        client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["admin_response_draft"].notna() & df_["admin_response_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="admin_response",
-        checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+    # --- Pass 2 removed (2026-10-13): see the docstring above for the full
+    # evidence (job65746412: draft recall 72.1% vs final recall 46.2%, plus
+    # 32/133 rows turned into an unparseable NA by pass 2 that had a draft
+    # answer; 15/15 pass-1-correct flips turned wrong, 0 corrected).
+    # Pass 1's own draft label is now the final answer: no further LLM call.
+    df["admin_response"] = df["admin_response"].where(
+        df["admin_response"].notna(), df["admin_response_draft"]
     )
 
     # --- Save ALL rows ---

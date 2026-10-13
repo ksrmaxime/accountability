@@ -14,18 +14,35 @@ is making the criticism. Rows step 3 did not confirm as criticism are left
 untouched — `content_type` stays NA for those.
 
 Two-pass design (added after the justification-first run showed the label
-sometimes contradicting its own justification — see src/verify_utils.py):
+sometimes contradicting its own justification — see src/verify_utils.py).
+
+2026-10-13: pass 2 removed. A draft-vs-final comparison on job65746412
+(800-row gold) found pass 2 severely harmful for this step: 55/132 rows
+flipped (31 hurt vs only 24 helped), draft accuracy 65.2% vs final 59.8%,
+draft F1 73.3% vs final F1 55.5% (recall collapses from 87.5% to 45.8%),
+almost entirely via a one-directional ENTITY->POLICY bias. Reading the
+flipped justifications shows pass 1 routinely echoes the SYSTEM_PROMPT's
+own counterfactual-test wording ("the content and wisdom of the choice
+itself", "would not disappear even if executed flawlessly") as boilerplate
+filler in its justification even on rows where its own label is (correctly)
+ENTITY -- exactly the "justifications that literally echo 'policy choice'"
+failure already named in the 2026-10-12 entry above, now shown to still be
+reproduced by pass 2 despite that entry's fix attempt. Since pass 2 never
+sees the article, it has no way to recover from this and defaults to
+POLICY whenever that vocabulary is present. Pass 1's own draft label is
+now written straight to the final column below, with no second LLM call:
 
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess POLICY/ENTITY label right after it. Both are kept: the
     justification under `content_type_justification`, the first-guess
-    label under `content_type_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `content_type_justification` (no article)
-    and classifies it into POLICY/ENTITY. This is the FINAL label, saved
-    as `content_type`.
+    label under `content_type_draft`. `content_type_draft` is then copied
+    straight to `content_type` (see the end of main(), just before Save).
+  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
+    and the --verify_* CLI args below are kept, unused, in case pass 2 is
+    revisited later.
 
-Output columns: content_type              -> "Policy" | "Entity" | NA  (final, pass 2)
-                content_type_draft         -> "Policy" | "Entity" | NA  (pass 1, QA only)
+Output columns: content_type              -> "Policy" | "Entity" | NA  (final = pass-1 draft)
+                content_type_draft         -> "Policy" | "Entity" | NA  (pass 1)
                 content_type_justification -> free text | NA            (pass 1)
 
 Usage
@@ -207,27 +224,12 @@ def main() -> int:
         checkpoint_every=50,
     )
 
-    # --- Pass 2: verify (final label, from the justification alone) ---
-    verify_cfg = RunConfig(
-        id_col="__index__",
-        text_col="content_type_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
-    )
-    df = run_llm_dataframe(
-        df=df,
-        cfg=verify_cfg,
-        client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["content_type_draft"].notna() & df_["content_type_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="content_type",
-        checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+    # --- Pass 2 removed (2026-10-13): see the docstring above for the full
+    # evidence (job65746412: draft F1 73.3% vs final F1 55.5%, recall
+    # 87.5% -> 45.8%, 55/132 flips with only 24 of them corrections).
+    # Pass 1's own draft label is now the final answer: no further LLM call.
+    df["content_type"] = df["content_type"].where(
+        df["content_type"].notna(), df["content_type_draft"]
     )
 
     # --- Save ALL rows ---
