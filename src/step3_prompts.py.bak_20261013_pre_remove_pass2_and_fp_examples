@@ -1,0 +1,253 @@
+# src/step3_prompts.py
+"""
+STEP 3 — criticism detection.
+
+Originally ported 1:1 from the legacy src/run3_prompts.py with the wording
+left untouched. After a real full run, two problems showed up in the actual
+results: (1) no justification was captured at all, so a wrong answer could
+not be diagnosed, and (2) the model sometimes seems to flag "{keyword}" as
+YES when it is actually the one doing the criticizing (or merely mentioned
+near criticism of something else), not the one being criticized. This
+version keeps the same core binary question but:
+  - explicitly tells the model not to confuse "{keyword} is criticized"
+    with "{keyword} is the one criticizing",
+  - asks for a one-sentence justification BEFORE the final YES/NO answer,
+    to force the small model to reason about the text instead of pattern-
+    matching straight to a label (same "reasoning before conclusion"
+    pattern already used in step 6, now applied consistently everywhere).
+
+Two-pass design (added after the justification-first run showed the label
+sometimes contradicting its own justification -- see src/verify_utils.py):
+
+  Pass 1 (draft)  — reads the article, writes the justification, then a
+    first-guess label right after it. Both are kept: the justification
+    under `keyword_justification`, the first-guess label under
+    `keyword_answer_draft` (QA only).
+  Pass 2 (verify) — reads ONLY `keyword_justification` (no article) and
+    classifies it into YES/NO. This is the FINAL label, saved as
+    `keyword_answer` — the name every downstream step's mask uses.
+
+This is the version that measured best on the 400-row gold comparison
+(job65205108: accuracy=75.7%, precision=56.4%, recall=78.8%, F1=65.7%,
+kappa=0.478).
+
+2026-09-29/30 and 2026-10-01 updates (all superseded below): three rounds
+of rewrites tried to fix two error patterns found in job65205108 -- (a)
+false negatives when the thing actually criticized is a policy/project/
+decision rather than "{keyword}" named directly, and (b) false positives
+from reading a neutral or merely-factual statement as criticism. Every one
+of these rewrites (two rounds of bolted-on exclusion rules in pass 1, one
+unified-definition rewrite, and finally a full architectural change moving
+the whole definition into a much longer pass 2 applied to a plain factual
+summary instead of the article) measured *worse* than job65205108 on every
+metric, the last one by a wide margin (job65277505: recall collapsed to
+11.9% because pass 2 was asked to make the entire judgment, cold, under an
+8-token budget with no room to reason -- see that run's analysis). A
+manual review of all its false negatives also showed the pass-1 summary
+itself was the bigger single cause (around 55% of cases), not just pass 2:
+an unguided 1-2 sentence summary written by a small model tends to pick the
+article's most generic facet rather than searching for a reproach that may
+sit elsewhere in a long article.
+
+2026-10-02, reverted + reinforced: back to the exact job65205108
+architecture and wording below (full article in pass 1, one-sentence
+justification + YES/NO label, pass 2 verifies that justification alone),
+on the reasoning that job65205108's remaining errors are worth fixing
+*from* its own wording rather than by replacing it again. Rather than
+re-adding exclusion rules to pass 1 (the thing that made every later
+rewrite worse -- a precise list of NO-cases reads, in practice, as "if a
+case isn't on this list, it's YES"), this version adds a small, genuinely
+balanced set of worked examples to each pass, calibrating both directions
+at once instead of only warning against false positives or only against
+false negatives:
+  - Pass 1 gets three YES examples and three NO examples illustrating the
+    SYSTEM_PROMPT's own existing distinction (criticized vs. criticizing,
+    vs. merely mentioned), including one case of institutional
+    responsibility (a project/policy run by the entity) so that pattern
+    isn't systematically missed -- but as one example among six balanced
+    ones, not as a dedicated bolted-on rule.
+  - Pass 2's job is unchanged (classify the pass-1 justification alone,
+    still without the article) and its prompt is still the short, simple
+    original -- but it now gets a few worked examples specifically aimed
+    at job65205108's main false-positive pattern: a justification that
+    only speculates or infers a reproach ("this could be seen as...",
+    "this suggests that...", "one might read this as...") without
+    describing an actual one, which should be corrected to NO even when
+    the justification's own stated conclusion was YES.
+
+2026-10-05, pass 2 simplified back to the bare original: job65304761
+(the run with the reinforced pass 2 above) measured accuracy=77.5% but
+F1=53.1%/recall=43.2%, well below job65205108 (F1=65.7%/recall=78.8%).
+Comparing `keyword_answer_draft` (pass 1) to the final `keyword_answer`
+isolated the cause precisely: pass 2 flipped 110 of 400 rows from YES to
+NO (and 0 the other way), but only 63 of those 110 flips were correct
+(gold=NO) -- the other 47 overturned a genuine gold=YES row into a false
+negative. Recomputed with pass 1's own draft kept as the final answer
+(no pass 2 at all), the run already reaches F1=64.9%/recall=83.1% --
+almost exactly job65205108's level -- which means pass 1 with its new
+balanced examples (added 2026-10-02, kept below) was not the problem: the
+4 worked examples added to pass 2 above were. Those examples equated the
+mere presence of a hedging word ("implies", "suggests") with baseless
+speculation deserving NO, but pass 1 also uses that same vocabulary to
+report a real, if indirectly-worded, criticism -- and this gold standard
+itself frequently labels an implicit criticism as YES. Pass 2's
+VERIFY_USER_TEMPLATE below has been reverted to the bare original
+question with no worked examples at all; VERIFY_SYSTEM_PROMPT was never
+changed and stays as-is. Pass 1 (SYSTEM_PROMPT/USER_TEMPLATE) is
+unchanged from 2026-10-02 below.
+
+2026-10-06, pass 1 reinforced against false positives: a manual review of
+all 75 false positives from job65448158 (where gold=NO but Apertus said
+YES) found that ~78% of them were not hallucinations but a target-
+attribution failure -- Apertus correctly noticed something negative,
+difficult, or conflictual in the article but pinned it on "{keyword}"
+instead of verifying who it actually applied to. Three recurring shapes:
+(a) a real criticism in the article targets a different, specific person/
+institution/decision, and gets re-attached to "{keyword}" because it
+appears nearby (~37% of the 75 cases, the largest single pattern); (b)
+"{keyword}" merely faces a difficult or negative situation (tension, an
+unpopular task, being the victim of a fraud) with nobody in the text
+blaming it for that situation (~25%); (c) "{keyword}" states its own
+position or decision and that gets read as the entity being criticized
+for it (~16%). Rather than adding a list of exclusion cases (the approach
+already shown to backfire -- see 2026-09-29/30/2026-10-01 above), this
+adds one clarifying sentence to SYSTEM_PROMPT operationalising "criticized"
+as fault attributed directly to this entity, plus a single new balanced
+YES/NO example pair in USER_TEMPLATE targeting pattern (a), the most
+frequent one. Pass 2 (VERIFY_SYSTEM_PROMPT/VERIFY_USER_TEMPLATE) and the
+force prompt are both left unchanged -- see Accountability_step3_FP_pattern_
+analysis_job65448158.md for the full case-by-case classification.
+
+2026-10-12, tried and reverted same day: calibrated against the corrected
+800-row gold (job65610203), the same two dominant shapes seemed to persist
+on the larger, partly-unseen set -- FPs reading a negative fact about the
+entity as fault, FNs missing an oversight report's fault-finding on the
+entity. One sentence was added to SYSTEM_PROMPT for the FP pattern and one
+new balanced worked example to USER_TEMPLATE for the FN pattern, pass 2 left
+untouched. Measured on job65710814 (the next 800-row gold run, same prompt):
+accuracy 80.50% -> 69.25%, precision 53.60% -> 41.12%, F1 65.64% -> 56.84%,
+FP 129 -> 232 (recall improved 84.66% -> 92.05%, FN 27 -> 14, but that gain
+was swamped by the FP cost, uniformly across both the tuned-on and unseen
+halves of the gold -- not a generalization-gap issue). Manual review of the
+newly-created false positives showed the damage was not confined to the
+targeted report/oversight pattern: the model became more willing to read
+an "implies/suggests" inference as criticism across many unrelated cases
+already covered by the pre-existing exclusion clauses (a predecessor's
+criticism re-attributed to a successor, a negative historical fact, a
+supply delay out of the entity's control) -- the same non-local
+recalibration effect already seen in the opposite direction on 2026-10-05.
+Reverted in full back to the exact wording below (job65610203's prompt);
+this file's pass 1 wording should be treated as closed for now rather than
+revisited with another single-example tweak.
+
+`matched_alias` is still used instead of the canonical `keyword` for the
+same reason as before: it's the literal term step 2 found in *this*
+article's own text.
+"""
+from __future__ import annotations
+import pandas as pd
+
+SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+You read a newspaper article and judge whether one specific, named entity
+is criticized in it. Be careful to distinguish an entity being criticized
+from an entity that is itself doing the criticizing, or one that is simply
+mentioned in a neutral or unrelated context. Only answer YES if the article
+itself attributes fault, blame, failure, or wrongdoing directly to this
+specific entity: an entity that merely faces a difficult or negative
+situation, carries out its normal role, is cited as a neutral source,
+states its own position or decision, or is mentioned near criticism that
+explicitly targets a different, specific person, institution, or policy,
+is not itself being criticized.\
+"""
+
+USER_TEMPLATE = """\
+In the article below, focus specifically on "{keyword}".
+
+ARTICLE:
+{article_text}
+
+Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
+
+Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
+
+For example:
+- "A parliamentary committee accuses the ministry of mismanaging a defense procurement project it runs, citing cost overruns." -> the ministry IS criticized: the reproach targets a project that is its own direct responsibility, even though the ministry itself is not named.
+- "Critics say the mayor's housing policy has worsened the rent crisis in the city." -> the mayor IS criticized: a clear reproach targets her decision.
+- "\"The agency has been negligent and failed to act in time,\" the auditor's report states." -> the agency IS criticized: a direct, explicit reproach.
+- "The agency reports a 3% increase in applications this year." -> NOT criticized: a plain neutral fact, no reproach is expressed.
+- "The minister dismisses the opposition's proposal as unrealistic." -> the minister is NOT criticized: here the minister is the one doing the criticizing, not the target.
+- "The report notes that the department was informed of the problem and tasked with following up." -> NOT criticized: being informed or involved is not itself a reproach.
+- "\"The agency's own negligence and repeated failures to act allowed the crisis to worsen,\" the audit concludes." -> the agency IS criticized: the fault is placed directly on the agency itself, not merely on the situation.
+- "A parliamentary committee criticizes a new government savings package; the office that helped carry out part of it is only mentioned as having implemented measures decided elsewhere." -> the office is NOT criticized: the criticism targets the package/decision, not this office, which is not itself named as being at fault.
+
+First, in two sentences, briefly explain the context of the article which makes you think that there is or not a criticism against "{keyword}".
+Then, on a new line, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_user_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
+
+
+# --- Pass 2 (verify): classify the pass-1 justification alone, without the
+# article. See src/verify_utils.py for why this second pass exists. ---
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Another analyst has already read a
+newspaper article and written a short explanation of whether a specific
+entity is criticized in it. You are not shown the article itself -- your
+only task is to read that explanation and decide which final answer it
+supports.\
+"""
+
+VERIFY_USER_TEMPLATE = """\
+The question was: is "{keyword}" criticized in the article?
+
+Here is the explanation given by the other analyst:
+"{justification}"
+
+Based solely on this explanation, answer with exactly one word: YES or NO.\
+"""
+
+
+def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)
+
+
+# --- Last resort (force): a bare one-word decision, no justification asked
+# for at all, used only for rows that still have no usable pass-1 answer
+# after every retry. Mirrors step4a's own force prompt (src/step4a_prompts.py)
+# -- deliberately minimal, the goal is just to stop a row from being
+# silently dropped, not to produce a reasoned judgment. Any row answered
+# this way is flagged via keyword_answer_forced = "TRUE" (see
+# scripts/step3_criticism_detection.py) and never goes through pass 2.
+# Unchanged across every rewrite this file has had.
+
+FORCE_SYSTEM_PROMPT = """\
+You are a media analysis assistant. Answer with exactly one word, nothing else.\
+"""
+
+FORCE_USER_TEMPLATE = """\
+In the article below, focus specifically on "{keyword}".
+
+ARTICLE:
+{article_text}
+
+Is "{keyword}" ITSELF being criticized in this article -- for who it is or what it did or decided?
+
+Answer with exactly one word: YES or NO.\
+"""
+
+
+def build_force_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return FORCE_USER_TEMPLATE.format(keyword=keyword, article_text=article_text)

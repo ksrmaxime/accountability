@@ -17,7 +17,9 @@ version keeps the same core binary question but:
     pattern already used in step 6, now applied consistently everywhere).
 
 Two-pass design (added after the justification-first run showed the label
-sometimes contradicting its own justification -- see src/verify_utils.py):
+sometimes contradicting its own justification -- see src/verify_utils.py).
+(Pass 2 is no longer used for the final answer -- see the 2026-10-13 entry
+below.)
 
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess label right after it. Both are kept: the justification
@@ -140,6 +142,49 @@ Reverted in full back to the exact wording below (job65610203's prompt);
 this file's pass 1 wording should be treated as closed for now rather than
 revisited with another single-example tweak.
 
+2026-10-13, pass 2 removed; two FP-reduction examples added: comparing
+pass-1-draft alone against the final (pass-2-verified) answer across every
+recent run showed pass 2 contributes little and is sometimes net negative.
+On job65556910 (this file's best full-800-row run), pass 2 touched only
+43/800 rows (5.4%); of its 30 NO->YES overrides, 24 were wrong -- leaving
+pass-1-alone's own accuracy (81.6%) and F1 (66.4%) BOTH higher than the
+full two-pass pipeline's (80.5% / 65.6%) on that same run. Pass 2 never
+sees the article, so it can only react to whatever framing pass 1's
+justification happens to use: it cannot independently catch a target-
+attribution confusion pass 1 already made, and it just as easily overturns
+a correct pass-1 answer on an ambiguous or hedged justification. Pass 1's
+own draft label (`keyword_answer_draft`) is now written straight to
+`keyword_answer` in scripts/step3_criticism_detection.py, with no further
+LLM call; VERIFY_SYSTEM_PROMPT/build_verify_prompt are left defined below,
+unused, in case pass 2 is revisited later.
+
+Separately, the 2026-10-12 revert above was itself followed, same day, by
+a one-line tweak to USER_TEMPLATE's final instruction (asking for "two
+sentences explaining the context ... which makes you think there is or
+not a criticism" instead of one sentence "briefly justify your answer"),
+intended to make the justification read as a neutral description rather
+than an interpretation the model then has to defend. Measured on
+job65719186: pass 1's OWN draft recall collapsed from 82.4% to 47.7%
+(draft-alone F1 66.4% -> 51.2%) -- the more neutral, two-sided framing
+made the model less willing to commit to flagging a real reproach even
+before pass 2 entered into it. That one-line change is reverted below,
+back to the original "briefly justify your answer" wording.
+
+In its place, two new worked examples are added to USER_TEMPLATE's
+existing list, aimed at the two most frequent shapes found in a close
+manual reading of 76 of job65556910's 129 false positives (all with full
+article text, not just title/lead): (a) the entity discloses a factual
+risk or warning about its own situation, with no fault stated by anyone,
+read as self-criticism anyway (the single most common shape, e.g. an
+office's own report flagging an insurance fund's growing deficit); (b)
+the entity is the one conducting an audit, inspection, or report that
+finds fault in a *different* actor, and having that finding rejected or
+disputed by the party it criticized gets misread as the entity itself
+being criticized (e.g. a financial oversight office whose findings on a
+defense contract are "firmly rejected" by the agency it audited). Both
+are added as one-line examples in the same format as the existing eight,
+with no change to SYSTEM_PROMPT or to the rest of the instruction.
+
 `matched_alias` is still used instead of the canonical `keyword` for the
 same reason as before: it's the literal term step 2 found in *this*
 article's own text.
@@ -180,8 +225,10 @@ For example:
 - "The report notes that the department was informed of the problem and tasked with following up." -> NOT criticized: being informed or involved is not itself a reproach.
 - "\"The agency's own negligence and repeated failures to act allowed the crisis to worsen,\" the audit concludes." -> the agency IS criticized: the fault is placed directly on the agency itself, not merely on the situation.
 - "A parliamentary committee criticizes a new government savings package; the office that helped carry out part of it is only mentioned as having implemented measures decided elsewhere." -> the office is NOT criticized: the criticism targets the package/decision, not this office, which is not itself named as being at fault.
+- "The agency's own internal report warns that, without additional funding, its insurance fund could become insolvent within a few years." -> the agency is NOT criticized: it is disclosing a risk about its own situation, and nobody in the text blames it for that risk.
+- "The financial oversight office questioned the fixed-price terms of a defense contract; the defense agency firmly rejected its findings." -> the oversight office is NOT criticized: it is the one raising the criticism, and having its findings disputed by the party it criticized does not make it the target of criticism.
 
-First, in two sentences, briefly explain the context of the article which makes you think that there is or not a criticism against "{keyword}".
+First, in one sentence, briefly justify your answer based on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\
 """
 
@@ -193,8 +240,11 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
 
 
-# --- Pass 2 (verify): classify the pass-1 justification alone, without the
-# article. See src/verify_utils.py for why this second pass exists. ---
+# --- Pass 2 (verify): previously classified the pass-1 justification
+# alone, without the article, to produce the FINAL label. As of 2026-10-13
+# this is no longer called -- scripts/step3_criticism_detection.py now
+# writes `keyword_answer_draft` straight to `keyword_answer`. Left defined
+# here, unused, in case pass 2 is revisited later. ---
 
 VERIFY_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Another analyst has already read a

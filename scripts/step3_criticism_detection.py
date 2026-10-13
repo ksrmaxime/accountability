@@ -18,18 +18,29 @@ src/step3_prompts.py for the fix). The model now returns a one-sentence
 justification BEFORE the YES/NO label.
 
 Two-pass design (added after the justification-first run showed the label
-sometimes contradicting its own justification — see src/verify_utils.py):
+sometimes contradicting its own justification — see src/verify_utils.py).
+
+2026-10-13: pass 2 removed. Comparing pass-1-draft alone against the final
+(pass-2-verified) answer across every recent gold-compared run showed pass 2
+contributes little and is sometimes net negative -- on job65556910 (the
+best full-800-row run so far), pass 2 touched only 43/800 rows (5.4%), and
+of its 30 NO->YES overrides, 24 were wrong, leaving pass-1-alone's own
+accuracy (81.6%) and F1 (66.4%) both HIGHER than the full two-pass
+pipeline's (80.5% / 65.6%) on that same run. See the 2026-10-13 entry in
+src/step3_prompts.py for the full writeup. Pass 1's own draft label is now
+written straight to the final column below, with no second LLM call:
 
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess label right after it. Both are kept: the justification
     under `keyword_justification`, the first-guess label under
-    `keyword_answer_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `keyword_justification` (no article) and
-    classifies it into YES/NO. This is the FINAL label, saved as
-    `keyword_answer` — the name every downstream step's mask uses.
+    `keyword_answer_draft`. `keyword_answer_draft` is then copied straight
+    to `keyword_answer` (see the end of main(), just before Save).
+  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
+    and the --verify_* CLI args below are kept, unused, in case pass 2 is
+    revisited later.
 
-Output columns: keyword_answer          -> "YES" | "NO" | NA   (final, pass 2)
-                keyword_answer_draft    -> "YES" | "NO" | NA   (pass 1, QA only)
+Output columns: keyword_answer          -> "YES" | "NO" | NA   (final = pass-1 draft, or forced)
+                keyword_answer_draft    -> "YES" | "NO" | NA   (pass 1)
                 keyword_justification   -> free text | NA      (pass 1)
 
 Usage
@@ -327,27 +338,17 @@ def main() -> int:
             flush=True,
         )
 
-    # --- Pass 2: verify (final label, from the justification alone) ---
-    verify_cfg = RunConfig(
-        id_col="__index__",
-        text_col="keyword_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
-    )
-    working = run_llm_dataframe(
-        df=working,
-        cfg=verify_cfg,
-        client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["keyword_answer_draft"].notna() & df_["keyword_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="keyword_answer",
-        checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+    # --- Pass 2 removed (2026-10-13): comparing pass-1-draft alone against
+    # the final (pass-2-verified) answer across every recent gold-compared
+    # run showed pass 2 contributes little and is sometimes net negative --
+    # see the 2026-10-13 entry in src/step3_prompts.py for the full
+    # evidence (job65556910: pass 2 touched only 43/800 rows, and left
+    # pass-1-alone's own accuracy/F1 both HIGHER than the two-pass result).
+    # Pass 1's own draft label is now the final answer: no further LLM call.
+    # `keyword_answer_forced` rows already have `keyword_answer` set from the
+    # force pass above and are left untouched by this fill.
+    working["keyword_answer"] = working["keyword_answer"].where(
+        working["keyword_answer"].notna(), working["keyword_answer_draft"]
     )
 
     # --- Save ---
