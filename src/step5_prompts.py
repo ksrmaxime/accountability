@@ -40,6 +40,21 @@ no -> POLICY). USER_TEMPLATE also gets its first worked example (this
 step previously had none, unlike steps 3/4a/4b/6) illustrating the ENTITY
 side of that test, since the backdrop-execution confusion is the larger
 and clearer of the two error directions.
+
+2026-10-14 update: a draft-vs-gold breakdown on job65774182 (800-row run,
+pass 2 now removed for this step -- see scripts/step5_content_type.py)
+found 19 POLICY->ENTITY errors on the 130-row step3-TP population
+(2 missing), of which 16 (84%) have a pass-1 justification that argues
+POLICY exclusively -- never even mentioning the word ENTITY -- while the
+recorded final label is ENTITY: the label disagrees with its own
+justification, the exact failure mode src/verify_utils.py documents as
+the original reason the (now-removed) two-pass design was built in the
+first place. USER_TEMPLATE previously had exactly one worked example, on
+the ENTITY side only; it now has two per side, in varied domains
+(execution/competence and personal scandal for ENTITY; a regulatory
+threshold and a budget choice for POLICY) so this fix does not just swap
+which single example the model anchors on, plus an explicit instruction
+that the final answer must match the justification's own conclusion.
 """
 from __future__ import annotations
 import pandas as pd
@@ -82,6 +97,14 @@ Is this criticism about a specific PUBLIC POLICY choice made by "{keyword}", or 
 Naming a specific policy, project, or decision does not by itself decide the answer -- ask: would the criticism disappear if "{keyword}" had executed it flawlessly? If yes, this is ENTITY. If the criticism would remain even with flawless execution, this is POLICY.
 
 For example: "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months." -> ENTITY: the criticism targets how poorly the program was run, not whether the subsidy itself was the right choice -- flawless execution would have resolved it.
+
+For example: "A Federal Councillor is criticized for using a government helicopter for personal, non-official travel." -> ENTITY: this is about personal conduct and integrity, not about any policy choice.
+
+For example: "The canton's food safety office is criticized for setting a water-filter threshold far stricter than its EU neighbours, disadvantaging local bottlers." -> POLICY: a different, less strict threshold could have been chosen instead -- the criticism is about which threshold was chosen, not how well it was enforced or communicated.
+
+For example: "The government is criticized for cutting funding to a research program instead of other programs." -> POLICY: a different budget allocation could have been made instead -- the criticism is about which choice was made, not about how well the cut was carried out.
+
+Make sure your final answer matches the conclusion of your own justification sentence: if your justification explains why the criticism targets the content or wisdom of a choice, your final answer must be POLICY, not ENTITY, and vice versa.
 
 First, in one sentence, justify your answer based on the article.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\

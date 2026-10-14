@@ -40,6 +40,22 @@ rather than more wording added to a rule that demonstrably isn't the
 bottleneck. This needs a larger verify token budget than the previous
 bare one-word answer; VERIFY_MAX_NEW_TOKENS was raised from 8 to 40 in
 sbatch_step4a_array.sh accordingly.
+
+2026-10-14 update: a draft-vs-gold breakdown on job65774182 (800-row run,
+pass 2 now removed for this step -- see scripts/step4a_source_attribution.py)
+found 13 FP (gold=JOURNALIST, Apertus=SOURCED) on the 130-row step3-TP
+population, of which 12 fall into two sub-patterns absent from any prior
+fix: a named political party/canton/coalition treated as a qualifying actor
+without a specific individual inside it ever being named (5 rows), and a
+signed column's own byline author mistaken for an external source (3 rows),
+plus the already-known target's-own-name confusion recurring in a milder
+form (4 rows, already covered by the exclusion sentence below -- no new
+rule needed there). USER_TEMPLATE now explicitly excludes collectives
+without a named individual and byline authors, with four worked examples
+(two SOURCED, two JOURNALIST) -- balanced on purpose, since the prompt
+previously had zero worked examples at all and two one-sided additions
+risked re-introducing the original default-to-JOURNALIST collapse this
+file's first fix (above) was built to escape.
 """
 from __future__ import annotations
 import pandas as pd
@@ -60,6 +76,14 @@ ARTICLE:
 {article_text}
 
 Look for a specific person, organization, or institution that is quoted, named, or clearly identified as making this criticism (for example: a named politician, an interest group, another authority, a civil servant, or a member of the public). "{keyword}" itself does not count as that actor just because it is named as the one who made the decision, took the action, or is otherwise the subject of the criticism -- the actor you are looking for is whoever is voicing or levelling the criticism, not the one the criticism targets.
+
+A political party, parliamentary group, canton, or other named collective does not count as that actor unless a specific individual within it is also named or quoted as voicing the criticism. The article's own byline author -- a signed column, editorial, or portrait piece -- is the journalist, not an external actor, even when their name appears prominently in the text.
+
+For example:
+- "Opposition MP Jane Doe called the decision 'reckless and irresponsible'." -> SOURCED: a specific named individual, distinct from the target, is quoted directly criticizing it.
+- "Peter Müller, head of the civil servants' union, said the reform was 'a betrayal of public sector workers'." -> SOURCED: a named individual with a specific role is quoted, even though they speak on behalf of an organization.
+- "The SP and a coalition of cantons jointly criticized the decision." -> JOURNALIST: a party and a group of cantons are named, but no specific individual within them is identified as voicing the criticism.
+- "This signed column by journalist Christophe Passer pokes fun at Guy Parmelin's recent gaffe." -> JOURNALIST: Christophe Passer is the article's own author, not an external source, even though he is named.
 
 First, in one sentence, say who -- if anyone -- is identified as making the criticism, or state that no specific actor is identified.
 Then, on a new line, answer with exactly one word:
