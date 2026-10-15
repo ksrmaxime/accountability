@@ -68,6 +68,19 @@ and no secondary rule is included this round, on purpose, to test whether
 simplifying and rewording the core distinction -- without anything extra
 for the model to latch onto or recite -- does better than either of the
 two example-based attempts above.
+
+2026-10-15 update #2: job65998611 confirmed the simplification direction
+helps (45.0% -> 63.4%) but still falls short of the original 78.1%
+baseline -- errors now echo this prompt's own vocabulary ("relevance and
+usefulness", "political motives") as filler almost verbatim, the same
+surface-echo failure mode as before, just with new words. Per request, a
+small EXAMPLES block is added back to USER_TEMPLATE: 2 POLICY + 2 ENTITY,
+each a different concrete scenario (tax threshold design / subsidy
+assumptions for POLICY; office response time / director leadership style
+for ENTITY) written in deliberately distinct vocabulary and sentence
+shape, specifically so no single phrase is common to all four and
+copy-paste-able as generic filler the way earlier single-example or
+repeated-template attempts were.
 """
 from __future__ import annotations
 import pandas as pd
@@ -100,6 +113,28 @@ ARTICLE:
 {article_text}
 
 Is this criticism about the public POLICY itself made by "{keyword}" -- its relevance, usefulness, objectives, feasibility, the political motives behind it, or its concrete effects and results -- or about "{keyword}" as an ENTITY -- how it carried out its tasks or its normal functioning: its competence, organization, representativeness, style, personality, or efficiency?
+
+=== EXAMPLES ===
+
+  "The new threshold was set far too low and will end up penalising small
+  businesses the measure was never meant to target." -> POLICY (the
+  complaint is about the design of the measure, not about who carries it
+  out)
+
+  "Even if rolled out perfectly, the subsidy would still fail to cut
+  emissions the way it promises to -- the whole plan rests on the wrong
+  assumptions." -> POLICY (the complaint is about what the plan is meant
+  to achieve, not about execution)
+
+  "It took the office eighteen months to answer a routine request, far
+  longer than comparable agencies manage." -> ENTITY (the complaint is
+  about how slowly and poorly the office operates, not about any decision
+  it made)
+
+  "Former staff describe a director who surrounded herself with loyalists,
+  sidelined internal experts, and let the workplace atmosphere turn toxic."
+  -> ENTITY (the complaint is about leadership and conduct, not about a
+  policy choice)
 
 First, in one sentence, justify your answer based on the article.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
