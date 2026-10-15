@@ -56,6 +56,24 @@ without a named individual and byline authors, with four worked examples
 previously had zero worked examples at all and two one-sided additions
 risked re-introducing the original default-to-JOURNALIST collapse this
 file's first fix (above) was built to escape.
+
+2026-10-15 update: job65965608 (first run with the 2026-10-14 examples
+above) moved accuracy from 74.6% to 78.5% on the 130-row step3-TP
+population (still short of the 80% target) but flipped the error profile:
+FN fell from 20 to 2 (recall 79%->98%, the collective/byline fix worked),
+while FP rose from 13 to 26. Reading the new FP justifications shows the
+model copied the surface FORM of the new SOURCED examples ("Name did X" ->
+SOURCED) rather than the discriminating principle -- new errors read
+literally "SOURCED: Martin Pfister" or "SOURCED: Albert Rösti" (the bare
+target name, the exact case the first paragraph below already excludes in
+prose) and even one self-contradicting "SOURCED: The journalist is making
+the criticism." USER_TEMPLATE now adds an explicit rule that a bare name
+with no description of what was said or done is not evidence, an explicit
+guard against this self-contradiction, and two more JOURNALIST-side
+examples in the same terse "bare name" surface form that was being
+copied -- deliberately unbalanced this round (2 SOURCED / 4 JOURNALIST)
+because the imbalance is now calibrated against a measured, data-backed
+error direction (FP running 2x FN), not an untested guess.
 """
 from __future__ import annotations
 import pandas as pd
@@ -77,15 +95,17 @@ ARTICLE:
 
 Look for a specific person, organization, or institution that is quoted, named, or clearly identified as making this criticism (for example: a named politician, an interest group, another authority, a civil servant, or a member of the public). "{keyword}" itself does not count as that actor just because it is named as the one who made the decision, took the action, or is otherwise the subject of the criticism -- the actor you are looking for is whoever is voicing or levelling the criticism, not the one the criticism targets.
 
-A political party, parliamentary group, canton, or other named collective does not count as that actor unless a specific individual within it is also named or quoted as voicing the criticism. The article's own byline author -- a signed column, editorial, or portrait piece -- is the journalist, not an external actor, even when their name appears prominently in the text.
+A political party, parliamentary group, canton, or other named collective does not count as that actor unless a specific individual within it is also named or quoted as voicing the criticism. The article's own byline author -- a signed column, editorial, or portrait piece -- is the journalist, not an external actor, even when their name appears prominently in the text. Naming a person is not enough by itself: if you cannot say what that person specifically said, wrote, or did to criticize the target, you have not found a source, and the answer is JOURNALIST.
 
 For example:
 - "Opposition MP Jane Doe called the decision 'reckless and irresponsible'." -> SOURCED: a specific named individual, distinct from the target, is quoted directly criticizing it.
 - "Peter Müller, head of the civil servants' union, said the reform was 'a betrayal of public sector workers'." -> SOURCED: a named individual with a specific role is quoted, even though they speak on behalf of an organization.
 - "The SP and a coalition of cantons jointly criticized the decision." -> JOURNALIST: a party and a group of cantons are named, but no specific individual within them is identified as voicing the criticism.
 - "This signed column by journalist Christophe Passer pokes fun at Guy Parmelin's recent gaffe." -> JOURNALIST: Christophe Passer is the article's own author, not an external source, even though he is named.
+- "A year-end satirical roundup mentions, among several other federal councillors, that Martin Pfister had a difficult year." -> JOURNALIST: Pfister's name appears only as the subject being discussed in a list of public figures; no one is quoted or described as criticizing him -- a bare name is not evidence.
+- "The piece ends with the byline 'by François Schaller', who shares his own view on the EU negotiations throughout the text." -> JOURNALIST: Schaller is the article's signed author; his own opinion is the journalist's narrative, not an external source being reported on.
 
-First, in one sentence, say who -- if anyone -- is identified as making the criticism, or state that no specific actor is identified.
+First, in one sentence, say who -- if anyone -- is identified as making the criticism, or state that no specific actor is identified. If your own sentence says no specific actor is identified, or that the criticism is the article's own narrative, your final answer must be JOURNALIST, not SOURCED.
 Then, on a new line, answer with exactly one word:
 SOURCED — if a specific actor is quoted, named, or clearly identified as making the criticism.
 JOURNALIST — if no specific actor is identified and the criticism is presented as the article's own narrative.\
