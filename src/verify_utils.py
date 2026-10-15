@@ -27,6 +27,26 @@ run: 9.3% of step 3 YES rows and 40% of step 6 YES rows had a
 justification that contradicted their own label. Pass 2 is a much
 narrower, easier task (classify one short sentence) and cannot see the
 long article, so it has nothing left to drift on.
+
+2026-10-15 update: a step 5 error review (job66014431) found some of
+what looked like this same drift was actually happening one level
+earlier than pass 1 generation -- in `_find_label` itself. It returned
+on the first `labels` dict key whose word appeared anywhere in the text,
+so a longer draft response (a full paragraph with no clean separate
+label line) could match a label word used as ordinary vocabulary in the
+reasoning ("...not about the policy itself...") before ever reaching
+the sentence's actual, later conclusion ("...so the answer is ENTITY").
+Since VERIFY_LABELS lists POLICY before ENTITY for step 5 (and SOURCED
+before JOURNALIST for step 4a), this silently biased every such
+paragraph-shaped response toward whichever label happens to be listed
+first, independent of the prompt wording. `_find_label` now returns the
+LAST label mention in the text instead of the first match found, which
+is dict-order-independent and matches the intended reading (whatever
+the response concludes with last is its real answer). This does not
+change anything for a clean two-line "justification, then one label
+word on its own line" response, which was already being parsed
+correctly; it only changes paragraph-shaped responses where a label
+word appears more than once.
 """
 from __future__ import annotations
 import re
@@ -103,12 +123,31 @@ def _is_bare(text: str, labels: dict) -> bool:
 def _find_label(text: str, labels: dict):
     """Word-boundary search for any of `labels`' keys anywhere in `text`
     (not just as a prefix) -- catches "Answer: SOURCED", "The answer is
-    JOURNALIST.", etc., not just a clean isolated label word."""
+    JOURNALIST.", etc., not just a clean isolated label word.
+
+    Returns the LAST matching label in `text`, not the first. Originally
+    this returned on the first `labels` dict key whose regex matched
+    anywhere in the text -- fine for a clean single-word line, but a
+    silent bug whenever `text` is a longer line/paragraph that uses a
+    label word as ordinary vocabulary before stating its real
+    conclusion (e.g. a step 5 justification arguing "...not about the
+    policy itself, but about how the agency operates, so the answer is
+    ENTITY" would match "POLICY" first purely because POLICY is listed
+    before ENTITY in VERIFY_LABELS, even though ENTITY is the sentence's
+    actual, later conclusion). Scanning for every match of every label
+    and keeping the one with the highest start position fixes this
+    regardless of dict order, and matches the intended reading: whatever
+    the response says last is its real answer.
+    """
     su = text.upper()
+    best_pos = -1
+    best_value = None
     for key, value in labels.items():
-        if re.search(r"\b" + re.escape(key) + r"\b", su):
-            return value
-    return None
+        for m in re.finditer(r"\b" + re.escape(key) + r"\b", su):
+            if m.start() > best_pos:
+                best_pos = m.start()
+                best_value = value
+    return best_value
 
 
 def parse_draft_labeled(raw: str, labels: dict) -> tuple:
