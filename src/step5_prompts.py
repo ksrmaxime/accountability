@@ -81,6 +81,32 @@ for ENTITY) written in deliberately distinct vocabulary and sentence
 shape, specifically so no single phrase is common to all four and
 copy-paste-able as generic filler the way earlier single-example or
 repeated-template attempts were.
+
+2026-10-16 update: job66020284 (post _find_label fix, see
+src/verify_utils.py) showed the remaining errors split into three kinds:
+(1) truncated pass-1 responses that never reach the final label line --
+see sbatch_step5_array.sh's MAX_NEW_TOKENS increase; (2) the target of the
+criticism being confused with the policy topic merely mentioned in the
+article (left alone for now, per request); and (3) a genuine pass-1
+label/justification contradiction on otherwise clean, complete responses
+(e.g. a justification concluding "...the disagreement is about what was
+decided, not how it was carried out" with ENTITY still recorded as the
+final answer) -- this is exactly the failure pass 2 was built to catch
+(see src/verify_utils.py's module docstring) and _find_label cannot fix
+it, since there is no textual ambiguity to resolve, just a generation-time
+inconsistency. Pass 2 is reactivated for this step (scripts/step5_content_type.py)
+to address kind (3) specifically. VERIFY_SYSTEM_PROMPT is updated to match
+SYSTEM_PROMPT's current WHAT/HOW dichotomy (it still carried the old
+2026-10-12 counterfactual-test wording, which no longer matches pass 1's
+actual category definitions) -- VERIFY_USER_TEMPLATE is unchanged, it was
+already generic. Unlike the step5 pass 2 removed back on 2026-10-13 (which
+read justifications written under the OLD counterfactual-test prompt and
+inherited its "policy choice" boilerplate bias), pass 2 now reads
+justifications written under the current, more concretely-grounded
+prompt, and is judging a definition that actually matches what pass 1 was
+asked. Whether this holds up has to be measured on the next run; if pass 2
+turns out to reintroduce the same one-directional bias as before, revert
+to this file's pre-reactivation state (see the .bak file from this date).
 """
 from __future__ import annotations
 import pandas as pd
@@ -160,22 +186,21 @@ criticism it describes into ONE of two categories.
 
 === CATEGORIES ===
 
-  Entity  — the criticism targets the target ITSELF: its behaviour, competence,
-            efficiency, management, integrity, morality, or a personal or
-            institutional scandal involving it or the people who run it.
+  Policy — the explanation describes a disagreement about WHAT was
+           decided, or what should be decided: the measure's relevance,
+           usefulness, objectives, feasibility, the political motives for
+           proposing or changing it, or its concrete effects/results.
 
-  Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
-            CHOICE: a named bill, reform, regulation, budget, decision, or
-            proposal the target is responsible for.
+  Entity — the explanation describes a disagreement about HOW the target
+           carried out its public-policy tasks or its normal functioning:
+           its competence, organization, representativeness, style,
+           personality, or productivity.
 
-A specific policy, decision, or project being named in the explanation does
-NOT by itself make this POLICY, and neither does the explanation simply
-using the words "policy", "choice", or "decision" -- judge what the
-criticism is actually about. Ask: would the criticism disappear if the
-target had executed this flawlessly? If yes, answer ENTITY, even if a
-specific policy, decision, or project is mentioned as the backdrop. If the
-criticism would remain even with flawless execution -- because it targets
-the content or wisdom of the choice itself -- answer POLICY.\
+Judge what the explanation's own reasoning is actually about, not just
+whether it mentions the word "policy" or names a specific measure as
+background -- an explanation can name a policy and still be about HOW it
+was handled (Entity), or describe someone's conduct and still be about
+WHAT was decided (Policy).\
 """
 
 VERIFY_USER_TEMPLATE = """\

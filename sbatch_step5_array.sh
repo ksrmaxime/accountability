@@ -35,7 +35,11 @@ BACKEND=transformers
 
 # Inference
 BATCH_SIZE=4
-MAX_NEW_TOKENS=80     # justification (1 phrase) + POLICY ou ENTITY
+MAX_NEW_TOKENS=140   # justification (1 phrase) + POLICY ou ENTITY -- releve de 80 a 140
+                     # (meme palier que step3/step4a) : job66020284 a montre des reponses
+                     # tronquees avant la ligne finale (justification plus detaillee depuis
+                     # les derniers ajouts au prompt), forcant le parseur a retomber sur le
+                     # dernier mot-cle present dans le texte tronque, pas forcement le bon.
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 
