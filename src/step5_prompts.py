@@ -107,6 +107,32 @@ prompt, and is judging a definition that actually matches what pass 1 was
 asked. Whether this holds up has to be measured on the next run; if pass 2
 turns out to reintroduce the same one-directional bias as before, revert
 to this file's pre-reactivation state (see the .bak file from this date).
+
+2026-10-19 hybrid: job66043922 (the WHAT/HOW SYSTEM_PROMPT/USER_TEMPLATE
+above, with pass 2 reactivated) landed at 70.0%, still below the
+78.1% reached on job65774182 by the original counterfactual-test
+SYSTEM_PROMPT/USER_TEMPLATE (the one kept in
+.bak_20261014_balanced_policy_entity_examples) -- a side-by-side TP/TN/FP/FN
+comparison showed the entire gap is on recall (89.4% then vs 71.8% now,
+FN 9 vs 24), with precision essentially unchanged (80.0% vs 80.3%). Per
+request, SYSTEM_PROMPT and USER_TEMPLATE are reverted here to that
+original, higher-recall counterfactual-test wording verbatim (restoring
+its single ENTITY-side worked example), while VERIFY_SYSTEM_PROMPT /
+VERIFY_USER_TEMPLATE are LEFT AS THE CURRENT (2026-10-16) WHAT/HOW
+versions, not reverted -- the idea being to pair pass 1's better-measured
+recall with a pass 2 built to catch label/justification drift on
+whatever vocabulary pass 1 actually produces, rather than pass 2's own
+(previously removed) counterfactual-test wording, which was shown on
+2026-10-13 to let the "policy choice" boilerplate bias become
+deterministic. This mixes two prompts that were never validated together;
+whether the vocabulary mismatch (pass 1 reasons in counterfactual terms,
+pass 2 judges in WHAT/HOW terms) causes new friction, or whether the two
+concepts are close enough that pass 2 still reads pass 1's justifications
+correctly, can only be answered by the next run. If this hybrid
+underperforms both single-prompt versions, the cleanest revert is this
+file's .bak_20261019_pre_hybrid_pass1_78pct copy (current, pre-hybrid
+state) or .bak_20261014_balanced_policy_entity_examples (original 78.1%
+pass 1 AND pass 2 together, pass 2 wording included).
 """
 from __future__ import annotations
 import pandas as pd
@@ -118,18 +144,24 @@ Your task is to classify the NATURE of this criticism into ONE of two categories
 
 === CATEGORIES ===
 
-  Policy — what is being criticized is the public policy itself: its
-           relevance, its usefulness, its objectives, its feasibility, the
-           political motives behind proposing it or wanting to change it,
-           or its concrete effects and results. The disagreement is about
-           WHAT was decided, or what should be decided.
+  Entity  — the criticism targets the target ITSELF: its behaviour, competence,
+            efficiency, management, integrity, morality, or a personal or
+            institutional scandal involving it or the people who run it.
 
-  Entity — what is being criticized is how the target carried out its
-           public-policy tasks, or its normal functioning: its competence,
-           organization, representativeness, style, personality, or its
-           efficiency (productivity) as a unit. The disagreement is about
-           HOW the target acted, not about the substance of the policy
-           itself.\
+  Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
+            CHOICE: a named bill, reform, regulation, budget, decision, or
+            proposal the target is responsible for.
+
+A specific policy, decision, or project being named in the article does NOT
+by itself make this POLICY, and neither does your own justification simply
+using the words "policy", "choice", or "decision" -- the decisive question
+is what the criticism is actually about. Ask yourself: if the target had
+executed this flawlessly, would the criticism disappear? If yes, the
+criticism is about delivery, competence, or communication -> answer ENTITY,
+even though a specific policy, decision, or project is the backdrop. If the
+criticism would remain even with flawless execution -- because critics
+object to the content or wisdom of the choice itself, and a different
+decision should have been made -- answer POLICY.\
 """
 
 USER_TEMPLATE = """\
@@ -138,29 +170,11 @@ In the article below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Is this criticism about the public POLICY itself made by "{keyword}" -- its relevance, usefulness, objectives, feasibility, the political motives behind it, or its concrete effects and results -- or about "{keyword}" as an ENTITY -- how it carried out its tasks or its normal functioning: its competence, organization, representativeness, style, personality, or efficiency?
+Is this criticism about a specific PUBLIC POLICY choice made by "{keyword}", or about "{keyword}" as an ENTITY (its behaviour, competence, efficiency, integrity, or a personal/institutional scandal)?
 
-=== EXAMPLES ===
+Naming a specific policy, project, or decision does not by itself decide the answer -- ask: would the criticism disappear if "{keyword}" had executed it flawlessly? If yes, this is ENTITY. If the criticism would remain even with flawless execution, this is POLICY.
 
-  "The new threshold was set far too low and will end up penalising small
-  businesses the measure was never meant to target." -> POLICY (the
-  complaint is about the design of the measure, not about who carries it
-  out)
-
-  "Even if rolled out perfectly, the subsidy would still fail to cut
-  emissions the way it promises to -- the whole plan rests on the wrong
-  assumptions." -> POLICY (the complaint is about what the plan is meant
-  to achieve, not about execution)
-
-  "It took the office eighteen months to answer a routine request, far
-  longer than comparable agencies manage." -> ENTITY (the complaint is
-  about how slowly and poorly the office operates, not about any decision
-  it made)
-
-  "Former staff describe a director who surrounded herself with loyalists,
-  sidelined internal experts, and let the workplace atmosphere turn toxic."
-  -> ENTITY (the complaint is about leadership and conduct, not about a
-  policy choice)
+For example: "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months." -> ENTITY: the criticism targets how poorly the program was run, not whether the subsidy itself was the right choice -- flawless execution would have resolved it.
 
 First, in one sentence, justify your answer based on the article.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
