@@ -50,6 +50,22 @@ measured gain, this change should be checked against the next run rather
 than assumed to fix it -- see also the separate, not-yet-done review of
 whether the GOLD labels for this field are themselves reliable.
 
+2026-10-20 update: added `strip_negative_boilerplate()`. Reading pass 1's
+own justifications (both correct and incorrect) shows it almost always
+opens -- or, less often, inserts mid-paragraph -- the same reflexive
+sentence ("The article does not contain a direct statement/response from
+X...") regardless of its own final answer: present verbatim on genuine NO
+rows, on rows where pass 1 itself is wrong, AND on some rows that are
+correctly YES because the real (indirect) response is only described
+afterwards. Since pass 2 reads only the justification text, this sentence
+is pure noise for it at best and a NO-biasing distraction at worst (see
+the dated entries below for the 2026-10-13 removal this caused). The
+function strips that one sentence, wherever it occurs, before the text
+reaches pass 2 -- see scripts/step6_admin_response.py for how the
+empty-after-stripping case is then handled (pass 1's own draft label is
+kept as final and pass 2 is skipped for that row -- there is nothing left
+to adjudicate, so neither YES nor NO would be a principled choice to force).
+
 2026-10-12 update: on the corrected 800-row gold (job65610203), step 6 is
 still the pipeline's weakest field (recall 42.7%), and 58% of its false
 negatives are pass-1-correct YES answers flipped to NO by pass 2 -- the
@@ -63,6 +79,33 @@ definition and, as in step 4a above, asks pass 2 to first quote the
 specific words/acts it is treating as a response (or "none") before
 answering. VERIFY_MAX_NEW_TOKENS was raised from 8 to 40 in
 sbatch_step6_array.sh for the same reason as step 4a.
+
+2026-10-20 update: reading the full article text (not just the
+justifications) behind 16 of step 6's errors on job66237092 found the
+single dominant pattern was NOT a judgment call but a sourcing mistake:
+7 of the 16 involve a statement from an office, spokesperson, or minister
+rather than "{keyword}" by name, and pass 1 gets the organisational link
+wrong in both directions -- missing a real response because it doesn't
+connect a named office back to "{keyword}" (e.g. its own justification
+quotes "the reasons given by Astra" and then concludes there is "no
+response from Rösti or his office" in the very next sentence, even though
+the article states two sentences earlier that Astra is "von Bundesrat
+Albert Rösti"), and crediting a response that was never "{keyword}"'s
+in the first place (a cantonal official's statement wrongly read as
+belonging to the federal DDPS). In every one of those 7 cases the article
+itself states the link (or explicitly marks it as absent, e.g. "kantonal")
+in the same or a nearby sentence -- this is a reading/tracking failure,
+not a case of pass 1 lacking outside knowledge of how Swiss administration
+is organised. USER_TEMPLATE now adds an explicit instruction to decide
+that link from what the article itself says, never from assumed general
+knowledge, and to treat an explicit mismatch (a different canton, country,
+or unrelated body) as disqualifying even under a similar-sounding title.
+This does not address the other three error kinds found in the same
+review (crediting a statement that criticizes a third party rather than
+defending "{keyword}"; mistaking a third-party claim about "{keyword}" for
+a statement by "{keyword}"; reading a sanction or order to redo work as
+if it were "{keyword}"'s own response) -- each was one isolated case, left
+for a later pass.
 """
 from __future__ import annotations
 import pandas as pd
@@ -83,6 +126,8 @@ Your task is to determine whether, in the article, "{keyword}" gives a response 
 to the reproach addressed to them.
 
 Count as a response: a direct statement from "{keyword}" itself; a statement given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, defense, acknowledgment of the problem, promise to fix or review it, or attempt to minimize its importance, regarding the decision or situation being criticized -- even if that statement is brief, general, or not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
+
+When such a response comes from an office, spokesperson, or minister rather than "{keyword}" by name, decide whether that speaker counts for "{keyword}" using only what the article itself states -- look for an explicit link written in the text (for example, "Bundesamt X von Bundesrat {keyword}", "{keyword}'s department/office", or a shared ministry named earlier in the article), not your own assumptions about how an administration is organised. If the article instead marks the speaker as belonging to a different level or place (a canton, a different country, an unrelated body) even under a similar-sounding title, that speaker's statement does not count for "{keyword}".
 
 Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, because another party unconnected to it comments on the criticism, or because the article merely reports that "{keyword}" took some action, changed course, or came under pressure, without "{keyword}" (or its spokesperson) actually saying anything about it.
 
@@ -149,6 +194,28 @@ First, quote the specific words or acts in this explanation that constitute \
 such a response, if any -- answer "none" if there is none.
 Then, on a new line, answer with exactly one word: YES or NO.\
 """
+
+
+import re
+
+_NEGATIVE_BOILERPLATE_RE = re.compile(
+    r"does not (contain|provide)\b.{0,80}?\b(direct (statement|response)|"
+    r"response or acknowledgment|acknowledgment)\b"
+    r"|there is no\b.{0,60}?\b(direct )?(response|statement|acknowledgment)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_negative_boilerplate(text) -> str:
+    """Remove the reflexive 'no direct response/statement' sentence(s) that
+    pass 1 tends to write regardless of its own final answer (see the
+    2026-10-20 docstring entry above), wherever in the text they occur --
+    not just at the start. Returns "" if nothing substantive remains."""
+    if text is None or (isinstance(text, float) and pd.isna(text)) or not str(text).strip():
+        return ""
+    sentences = re.split(r'(?<=[.!?])\s+', str(text).strip())
+    kept = [s for s in sentences if not _NEGATIVE_BOILERPLATE_RE.search(s)]
+    return " ".join(kept).strip()
 
 
 def build_verify_prompt(row: pd.Series, justification_col: str) -> str:

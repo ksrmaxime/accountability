@@ -37,6 +37,30 @@ than the label) does not hold here: the label is usually the more
 reliable of the two. Pass 1's own draft label is now written straight to
 the final column below, with no second LLM call:
 
+2026-10-20: pass 2 reactivated a second time, on evidence that
+job66237092's error profile was different (19 of 25 false positives had
+a justification flatly saying no response exists while the recorded
+label was still YES -- a pure label/justification contradiction). A
+strip-boilerplate preprocessing step (strip_negative_boilerplate() in
+src/step6_prompts.py) was added on top so pass 2 only saw the
+justification with the reflexive "no direct response" sentence removed.
+Abandoned the same day, before ever running on the cluster: reasoning it
+through showed the mechanism reduces to a near-deterministic rule with
+marginal benefit over just hardcoding it, and leaves 15 of the 19
+targeted FP untouched regardless (only rows with surviving text after
+the strip ever reach pass 2). Reading the full articles behind the 17
+remaining coherent pass-1 errors (11 FN + 6 FP) found only 1 of 17 was a
+genuine gold boundary case (fixed directly in GOLD_ACCOUNTABILITY.csv --
+Albert Rösti / zones30, NO -> YES); the other 16 were real comprehension
+errors, 7 of them sharing one identifiable pattern (confusing which
+office/spokesperson organisationally speaks for {keyword}), now addressed
+directly in src/step6_prompts.py's USER_TEMPLATE instead (the 2026-10-20
+"organisational link" paragraph) -- pass-1-side, no second LLM call
+needed. Pass 2 and the strip step are therefore removed again, back to
+the 2026-10-13 disabled state, now for this second, independent reason.
+strip_negative_boilerplate() is left defined in src/step6_prompts.py,
+unused, in case it is useful again later.
+
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess YES/NO label right after it. Both are kept: the
     justification under `admin_response_justification`, the first-guess

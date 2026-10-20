@@ -29,40 +29,54 @@ ENTITY -- exactly the "justifications that literally echo 'policy choice'"
 failure already named in the 2026-10-12 entry above, now shown to still be
 reproduced by pass 2 despite that entry's fix attempt. Since pass 2 never
 sees the article, it has no way to recover from this and defaults to
-POLICY whenever that vocabulary is present. Pass 1's own draft label was
-written straight to the final column, with no second LLM call.
-
-2026-10-16: pass 2 reactivated. job66020284 (run under the current,
-rewritten SYSTEM_PROMPT/USER_TEMPLATE -- see src/step5_prompts.py's
-docstring for the full history -- with the _find_label parsing fix
-already in place) still showed a residual, purely generation-time
-label/justification contradiction on otherwise clean, complete pass-1
-responses (e.g. a justification concluding "the disagreement is about
-what was decided, not how it was carried out" with ENTITY still recorded
-as the final answer) -- exactly the failure pass 2 exists to catch (see
-src/verify_utils.py's module docstring), and not something _find_label
-can fix since there is no textual ambiguity, just an inconsistent final
-token. Unlike the 2026-10-13 removal above, this pass 2 reads
-justifications written under the CURRENT prompt (not the old
-counterfactual-test one that was itself biased toward "policy choice"
-boilerplate), and VERIFY_SYSTEM_PROMPT has been rewritten to match
-today's WHAT/HOW category definitions instead of the stale 2026-10-12
-counterfactual-test wording it still carried. Whether this holds up
-without reproducing the old one-directional bias needs to be checked on
-the next run; if it does, revert using this file's
-.bak_20261016_pre_pass2_reactivation copy.
+POLICY whenever that vocabulary is present. Pass 1's own draft label is
+now written straight to the final column below, with no second LLM call
+(this held from 2026-10-13 to 2026-10-16, then again as of 2026-10-20 --
+see the next two entries):
 
   Pass 1 (draft)  — reads the article, writes the justification, then a
     first-guess POLICY/ENTITY label right after it. Both are kept: the
     justification under `content_type_justification`, the first-guess
-    label under `content_type_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `content_type_justification` (no article)
-    and classifies it into POLICY/ENTITY using the same WHAT/HOW
-    definitions as pass 1. This is the FINAL label, saved as
-    `content_type`.
+    label under `content_type_draft`. `content_type_draft` is then copied
+    straight to `content_type` (see the end of main(), just before Save).
+  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
+    and the --verify_* CLI args below are kept, unused, in case pass 2 is
+    revisited later.
 
-Output columns: content_type              -> "Policy" | "Entity" | NA  (final, pass 2)
-                content_type_draft         -> "Policy" | "Entity" | NA  (pass 1, QA only)
+2026-10-16: pass 2 reactivated, then (2026-10-20) removed again -- see
+below for both.
+
+2026-10-20: pass 2 removed a second time. The 2026-10-16 reactivation
+(VERIFY_SYSTEM_PROMPT rewritten to match the WHAT/HOW SYSTEM_PROMPT that
+was live then) was itself superseded on 2026-10-19 when SYSTEM_PROMPT /
+USER_TEMPLATE in src/step5_prompts.py were reverted to the original,
+higher-recall counterfactual-test wording (the one that scored 78.1% on
+job65774182), while VERIFY_SYSTEM_PROMPT was left as the WHAT/HOW version
+-- an explicit hybrid experiment. job66237092 (run under that hybrid)
+reproduced the exact same one-directional bias as the original 2026-10-13
+removal, worse: 63/130 rows flipped, ALL ENTITY(draft)->POLICY(final),
+40 of them hurting a correct draft and only 23 helping, vs 0 flips in
+the other direction. Root cause confirmed by reading the flipped
+justifications: pass 1's reverted counterfactual-style prompt makes it
+write justifications saturated with "policy choice" / "the decision
+itself" vocabulary even on rows whose own final draft label is (correctly)
+ENTITY, and pass 2 -- seeing only that text, never the article -- reads
+the vocabulary density rather than the actual logic and defaults to
+POLICY. This is the same failure mode as the 2026-10-13 removal, just
+triggered by a different (reverted) pass-1 prompt; it is not obviously
+fixable by further tweaking VERIFY_SYSTEM_PROMPT's wording alone, since
+the problem is upstream, in what pass 1 writes. Pass 1's own draft
+(bug-fixed _find_label + MAX_NEW_TOKENS=140) reaches 76.2% accuracy /
+95.3% recall on its own (N=130, job66237092 draft-only), which is what is
+now kept as the final answer again, with no second LLM call. If pass 2 is
+revisited again, it should probably start from fixing pass 1's
+justification-writing instructions (e.g. asking it to state topic-vs-target
+explicitly and early, before using any "policy" vocabulary) rather than
+rewording pass 2 again. Revert using this file's
+.bak_20261020_pre_pass2_second_removal copy if pass 2 is reactivated.
+
+Output columns: content_type              -> "Policy" | "Entity" | NA  (final = pass-1 draft)
+                content_type_draft         -> "Policy" | "Entity" | NA  (pass 1)
                 content_type_justification -> free text | NA            (pass 1)
 
 Usage
@@ -244,28 +258,12 @@ def main() -> int:
         checkpoint_every=50,
     )
 
-    # --- Pass 2: verify (final label, from the justification alone) ---
-    # Reactivated 2026-10-16 -- see the docstring above for why.
-    verify_cfg = RunConfig(
-        id_col="__index__",
-        text_col="content_type_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
-    )
-    df = run_llm_dataframe(
-        df=df,
-        cfg=verify_cfg,
-        client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["content_type_draft"].notna() & df_["content_type_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="content_type",
-        checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+    # --- Pass 2 removed (2026-10-13): see the docstring above for the full
+    # evidence (job65746412: draft F1 73.3% vs final F1 55.5%, recall
+    # 87.5% -> 45.8%, 55/132 flips with only 24 of them corrections).
+    # Pass 1's own draft label is now the final answer: no further LLM call.
+    df["content_type"] = df["content_type"].where(
+        df["content_type"].notna(), df["content_type_draft"]
     )
 
     # --- Save ALL rows ---
