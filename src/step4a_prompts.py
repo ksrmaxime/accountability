@@ -75,42 +75,6 @@ copied -- deliberately unbalanced this round (2 SOURCED / 4 JOURNALIST)
 because the imbalance is now calibrated against a measured, data-backed
 error direction (FP running 2x FN), not an untested guess.
 
-2026-10-20 update: a close read of 13 sampled errors from job66237092
-(gold vs. the broadened 2026-10-15#2 rewrite) found the overall rule in
-that rewrite is sound, but pass 1 keeps missing two concrete, recurring
-textual signals rather than failing the underlying logic. (1) Interview
-format: in several FN cases (an EFK chief, a cantonal crisis-management
-chief, both in Q&A format) the entire criticism is the interviewee's own
-quoted answer, but Apertus calls it "the article's own narrative framing"
--- it does not seem to register that, in an alternating question/answer
-layout, every answer IS that named interviewee's own words even with no
-"X said" tag wrapping it paragraph by paragraph. (2) Explicit but easy-to-
-miss attribution markers: phrases like "according to SRF", "as X once
-said", "commented the newspaper Y" (even when Y is the publication
-reporting the story itself, not a third party) or vaguer collective hedges
-("it was said on one side... others report") were present in the text
-right next to the criticism, and still missed. One gold row itself had
-this exact bug (OFROU/ASTRA spa-seminar FP, df5689ae...: gold said
-JOURNALIST while its own justification said "attributed to the media
-investigation" -- corrected to SOURCED). USER_TEMPLATE now adds two
-targeted paragraphs with worked examples for these two signals, without
-touching the broader test from 2026-10-15#2.
-
-A follow-up read of the remaining 20 FN rows (29 total) confirmed this is
-overwhelmingly a recall problem, not a logic gap: 18 of 20 have an
-explicit named or institutional critic in the text (a parliamentary
-finance delegation, a named MP, an auditor's report, a department
-spokesperson) that pass 1 simply did not surface, several in long
-"roundup" articles listing many problems with many quotes. One more
-sub-pattern showed up here: a reader-comments aggregation piece (named
-forum usernames quoted criticizing an office's late communication) --
-the "outside voice can be identified as..." sentence now explicitly
-includes "a reader/commenter quoted by name or username in a comments
-roundup" in that list. Only 1-2 of the 20 look like genuine boundary
-cases rather than misses (e.g. a passing, unattributed "cantons would be
-happier with X than with {keyword}" line with no named critic in sight) --
-left as-is, not worth a rule change for one ambiguous case.
-
 2026-10-15 update #2 (full rewrite): job65998611's 28 FN (gold=SOURCED,
 Apertus=JOURNALIST) showed the 2026-10-14 collective-exclusion rule above
 is miscalibrated against the actual gold standard -- named but
@@ -137,6 +101,29 @@ scenario and phrasing chosen to avoid a single copy-pasteable template,
 replace the previous four. The self-contradiction guard and the
 "bare name is not evidence" sentence from the 2026-10-15 update above are
 dropped as separate rules since the rewritten test already subsumes them.
+
+2026-10-20 update #2: added interview-format and attribution-marker
+paragraphs to USER_TEMPLATE plus a reader/commenter addition to the
+outside-voice list, after reading 13+20 sampled job66237092 errors that
+looked like exactly these two blind spots. Reverted the same week:
+job66315460 (full pipeline rerun with this change) showed accuracy
+DROPPING from 74.6% to 67.7% (FN 29 -> 38, recall 70.1% -> 61.2%), and --
+more tellingly -- the three showcase rows the new examples were built
+around (the Dussey/SRC interview, the Giussani/Parmelin interview, the
+Ofrou spa-seminar SonntagsBlick case) were STILL wrong on the new run,
+with the same generic "attributed to the article's own narrative framing"
+justification as before, as if the new paragraphs were never used. This
+reads as the exact failure mode the 2026-10-07 entry at the top of this
+file describes: an 8B model, given a longer and more complex instruction
+block, collapses toward the lazy default (JOURNALIST) rather than
+engaging with the added nuance. USER_TEMPLATE reverted to the
+2026-10-15#2 version below (the 2026-10-20 version is saved as
+.bak_20261021_pre_revert_interview_markers for reference). The underlying
+observations from the 13+20-row read (interview Q&A answers count as an
+outside voice; vague/anonymous attribution markers and reader comments
+count too) are still believed correct -- they just can't be added as more
+prose to an already-dense prompt for this model. If revisited, try
+shortening/cutting existing content to make room rather than appending.
 """
 from __future__ import annotations
 import pandas as pd
@@ -162,9 +149,8 @@ outside voice, or is it the article's own narrative framing?
 
 An outside voice can be identified as loosely as a named individual, a
 political party, a canton, an administration, a company, an association, a
-category of people ("residents," "opponents," "experts"), survey
-respondents, or a reader/commenter quoted by name or username in a
-comments roundup -- none of this needs a specific person's name to qualify.
+category of people ("residents," "opponents," "experts"), or survey
+respondents -- none of this needs a specific person's name to qualify.
 "{keyword}" itself never counts as that voice just because it is named as
 the one who made the decision, took the action, or is otherwise the
 subject of the criticism.
@@ -187,24 +173,6 @@ For example:
 - "A year-end roundup lists, among several federal councillors, that Martin Pfister had a difficult year." -> JOURNALIST: Pfister's name appears only as the subject being discussed; no one is credited with criticizing him.
 - "The piece quotes an economist about the state of the labour market, then separately argues in its own voice that the minister's reform is misguided." -> JOURNALIST: an outside voice is quoted, but not for the criticism of the minister -- that judgment is the article's own.
 - "The piece argues, in its own narrative voice, that the reform is short-sighted and will hurt small businesses, without attributing that judgment to any critic, resident, expert, or other outside voice." -> JOURNALIST: no outside voice is credited with the criticism at all.
-
-Two concrete textual signals are easy to miss but should always count as an
-outside voice. First, an interview in question/answer format: if the
-article alternates between a question and a named interviewee's direct
-answer, every answer is that interviewee's own words -- a critical
-judgment appearing inside an answer is attributed to that person, even
-though no "X said" tag wraps each individual answer, and even if the
-interviewee holds an oversight or government role and is discussing
-problems in their own area of responsibility.
-- "Q: What do you make of the agency's handling of the project? A: 'They sat on our recommendations for years and attacked us for raising the risk.'" -> SOURCED: this answer is the interviewee's own quoted words criticizing the agency, even with no "he/she said" wrapper around it.
-
-Second, watch for attribution markers next to the criticism even when they
-are brief or do not wrap a full quotation: "according to X," "as X once
-said," "commented X," "X reports," or vaguer collective hedges such as "it
-was said on one side... others report." All of these credit the judgment
-to someone other than the journalist, including when that someone is the
-outside publication or investigation the article itself is reporting on.
-- "Internal auditors spent three nights at a luxury spa hotel on expenses -- 'a disgrace for the very department meant to police expense claims,' comments the newspaper X, whose investigation this report is relaying." -> SOURCED: the critical comment is explicitly tagged as the cited newspaper's own, even though this article is itself a secondhand report of that investigation.
 
 First, in one sentence, say whether the criticism of "{keyword}" specifically is attributed to an outside voice (and who, even loosely), or whether it is the article's own narrative framing.
 Then, on a new line, answer with exactly one word:
