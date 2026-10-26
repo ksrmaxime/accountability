@@ -11,34 +11,53 @@ Rows step 4a did NOT mark SOURCED (JOURNALIST, or never reached because
 step 3 did not confirm criticism) are left untouched — `source_category`
 stays NA for those rows.
 
-Two-pass design (added after the justification-first run showed the label
-sometimes contradicting its own justification — see src/verify_utils.py):
+Three-pass design (2026-10-26 rewrite of the original two-pass design —
+see src/step4b_prompts.py's changelog for the full rationale: the old
+pass 2 classified a one-sentence justification with no article, which
+meant it could never catch pass 1 having picked the wrong ACTOR in the
+first place, only re-classify whatever description it was handed):
 
   Pass 1 (draft)  — reads the article, names who is making the criticism,
     then a first-guess category label right after it. Both are kept: the
     justification under `source_category_justification`, the first-guess
     label under `source_category_draft` (QA only).
-  Pass 2 (verify) — reads ONLY `source_category_justification` (no
-    article) and classifies it into one of the SAME 6 categories. This is
-    a genuine 6-way classification, not a binary one, so the verify system
-    prompt repeats the full category legend from src/step4b_prompts.py —
-    the second pass gets the same category boundaries to work with, just
-    without the article. This is the FINAL label, saved as
-    `source_category`.
+  Pass 2 (verify, WITH the article) — reads the article again, together
+    with pass 1's bare category label only (never the justification or
+    the specific actor pass 1 named), and answers YES/NO to "is {keyword}
+    genuinely criticized by {category} in this article". Deliberately
+    binary, not 6-way: a focused yes/no check the model can actually
+    re-derive from the article, instead of a fresh unconstrained
+    classification. Saved as `source_category_pass2_answer` (YES/NO) and
+    `source_category_pass2_justification` (free text).
+  Pass 3 (reclassify, only for pass-2 NO rows) — reads ONLY pass 2's
+    rejection justification (never the article again), and reclassifies
+    into one of the SAME 6 categories as pass 1 -- mirrors the shape of
+    the OLD pass 2, just fed pass 2's rejection text instead of pass 1's
+    original justification. Saved as `source_category_pass3`. All 6
+    categories stay available, including the one pass 2 rejected.
 
-Output columns: source_category              -> one of 6 categories | NA  (final, pass 2)
-                source_category_draft         -> one of 6 categories | NA  (pass 1, QA only)
-                source_category_justification -> free text | NA            (pass 1)
+Final answer (`source_category`): pass 1's draft when pass 2 answers
+YES; pass 3's category when pass 2 answers NO; NA when pass 2 or pass 3
+fails to parse -- never finalizing an answer that wasn't actually
+verified, same policy as before.
+
+Output columns: source_category                    -> one of 6 categories | NA  (FINAL)
+                source_category_draft               -> one of 6 categories | NA  (pass 1, QA only)
+                source_category_justification        -> free text | NA            (pass 1)
+                source_category_pass2_answer         -> YES/NO | NA               (pass 2)
+                source_category_pass2_justification  -> free text | NA            (pass 2)
+                source_category_pass3                -> one of 6 categories | NA  (pass 3, only for pass-2 NO rows)
 
 Usage
 -----
-  python scripts/step4b_source_category.py \\
-      --input       data/output/step4a_merged/results.parquet \\
-      --output_base data/output/step4b \\
-      --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
-      --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 90 --max_input_tokens 16384 \\
-      --verify_batch_size 16 --verify_max_new_tokens 12 --verify_max_input_tokens 512
+  python scripts/step4b_source_category.py \
+      --input       data/output/step4a_merged/results.parquet \
+      --output_base data/output/step4b \
+      --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \
+      --dtype bf16 --batch_size 4 --temperature 0.0 \
+      --max_new_tokens 90 --max_input_tokens 16384 \
+      --pass2_batch_size 4 --pass2_max_new_tokens 90 --pass2_max_input_tokens 16384 \
+      --pass3_batch_size 16 --pass3_max_new_tokens 12 --pass3_max_input_tokens 512
 """
 from __future__ import annotations
 
@@ -57,7 +76,8 @@ from src.client import TransformersClient, LLMConfig
 from src.runner import run_llm_dataframe, RunConfig
 from src.step4b_prompts import (
     SYSTEM_PROMPT, build_user_prompt,
-    VERIFY_SYSTEM_PROMPT, build_verify_prompt,
+    PASS2_SYSTEM_PROMPT, build_pass2_prompt,
+    PASS3_SYSTEM_PROMPT, build_pass3_prompt,
     FORCE_SYSTEM_PROMPT, build_force_prompt,
 )
 from src.step4b_config import build_mask
@@ -74,16 +94,22 @@ CATEGORIES = [
 _CATEGORIES_UPPER = {c.upper(): c for c in CATEGORIES}
 
 DRAFT_COLS = ["source_category_draft", "source_category_justification"]
+PASS2_COLS = ["source_category_pass2_answer", "source_category_pass2_justification"]
+PASS3_COLS = ["source_category_pass3"]
 FINAL_COLS = ["source_category"]
 # Flag column: "TRUE" when a row's final answer came from the last-resort
-# forced pass rather than a genuine two-pass verification -- see the
+# forced pass rather than a genuine pass-1/2/3 verification -- see the
 # retry/force block in main(). NA for every normally-answered row.
 FLAG_COLS = ["source_category_forced"]
-ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS
+ALL_COLS = DRAFT_COLS + PASS2_COLS + PASS3_COLS + FINAL_COLS + FLAG_COLS
 
-# Pass 2 uses the exact same 6-way mapping as pass 1 — this is a genuine
+# Pass 1 and pass 3 use the exact same 6-way mapping — a genuine
 # multi-choice classification, not a binary one (unlike step 3/4a/5/6).
 VERIFY_LABELS = _CATEGORIES_UPPER
+# Pass 2 is a binary yes/no check (with its own justification), parsed
+# with the same draft+label helper used for pass 1 and for step 3/4a/5/6's
+# own pass 1 -- just with a 2-way label set instead of the 6-way one.
+PASS2_LABELS = {"YES": "YES", "NO": "NO"}
 
 
 def parse_draft_output(raw: str) -> dict:
@@ -96,8 +122,18 @@ def parse_draft_output(raw: str) -> dict:
     return {"source_category_draft": label, "source_category_justification": justification}
 
 
-def parse_verify_output(raw: str) -> dict:
-    return {"source_category": parse_label_only(raw, VERIFY_LABELS)}
+def parse_pass2_output(raw: str) -> dict:
+    """Same shape as parse_draft_output, but a binary YES/NO label instead
+    of the 6-way category set -- see PASS2_LABELS."""
+    empty = {"source_category_pass2_answer": pd.NA, "source_category_pass2_justification": pd.NA}
+    answer, justification = parse_draft_labeled(raw, PASS2_LABELS)
+    if answer is None:
+        return empty
+    return {"source_category_pass2_answer": answer, "source_category_pass2_justification": justification}
+
+
+def parse_pass3_output(raw: str) -> dict:
+    return {"source_category_pass3": parse_label_only(raw, VERIFY_LABELS)}
 
 
 def main() -> int:
@@ -126,18 +162,27 @@ def main() -> int:
     # would just reproduce the same failure, so each retry raises
     # temperature and token budget a notch; whatever is still unresolved
     # after --draft_max_retries gets one forced category-only attempt
-    # (flagged via source_category_forced, never sent through pass 2).
+    # (flagged via source_category_forced, never sent through pass 2/3).
     # Mirrors step4a's own retry/force mechanism exactly. ---
     ap.add_argument("--draft_max_retries",   type=int,   default=2,
                     help="Extra pass-1 attempts (beyond the first) for eligible rows still unanswered, each at a higher temperature/token budget.")
     ap.add_argument("--retry_temperature",   type=float, default=0.4,
                     help="Temperature for the first retry attempt; raised by +0.2 per further attempt, capped at 0.9.")
 
-    # --- Inference: pass 2 (verify, reads only the justification) ---
-    ap.add_argument("--verify_batch_size",       type=int,   default=16)
-    ap.add_argument("--verify_temperature",      type=float, default=0.0)
-    ap.add_argument("--verify_max_new_tokens",   type=int,   default=12)
-    ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
+    # --- Inference: pass 2 (verify WITH the article -- same budget shape
+    # as pass 1, since it reads the full article again, just answering a
+    # binary question instead of a 6-way one) ---
+    ap.add_argument("--pass2_batch_size",       type=int,   default=4)
+    ap.add_argument("--pass2_temperature",      type=float, default=0.0)
+    ap.add_argument("--pass2_max_new_tokens",   type=int,   default=90)
+    ap.add_argument("--pass2_max_input_tokens", type=int,   default=16384)
+
+    # --- Inference: pass 3 (reclassify from pass 2's rejection text alone
+    # -- short input, short output, same budget shape the old pass 2 used) ---
+    ap.add_argument("--pass3_batch_size",       type=int,   default=16)
+    ap.add_argument("--pass3_temperature",      type=float, default=0.0)
+    ap.add_argument("--pass3_max_new_tokens",   type=int,   default=12)
+    ap.add_argument("--pass3_max_input_tokens", type=int,   default=512)
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -282,9 +327,8 @@ def main() -> int:
     # still unresolved after every retry. No justification is requested
     # (there is nothing left to try to extract from this model on this
     # row), so the forced label is written straight to source_category and
-    # the row never goes through pass 2 -- source_category_forced=True
-    # marks it so it is never mistaken for a genuine two-pass-verified
-    # answer.
+    # the row never goes through pass 2/3 -- source_category_forced=True
+    # marks it so it is never mistaken for a genuine verified answer.
     still_na = build_mask(df, text_col=args.text_col) & df["source_category_draft"].isna()
     n_forced_candidates = int(still_na.sum())
     if n_forced_candidates:
@@ -335,28 +379,80 @@ def main() -> int:
             flush=True,
         )
 
-    # --- Pass 2: verify (final category, from the justification alone) ---
-    verify_cfg = RunConfig(
+    # --- Pass 2: verify WITH the article again -- reads args.text_col
+    # (the article), plus the row's own source_category_draft (consumed
+    # inside build_pass2_prompt via CATEGORY_PHRASE, never the
+    # justification). Forced rows are excluded the same way the old pass 2
+    # excluded them: they have no source_category_justification, and that
+    # is kept as the eligibility guard here too even though pass 2 itself
+    # does not read that column, simply to preserve "a forced row never
+    # goes through verification" exactly as before. ---
+    pass2_cfg = RunConfig(
         id_col="__index__",
-        text_col="source_category_justification",
-        batch_size=args.verify_batch_size,
-        temperature=args.verify_temperature,
-        max_new_tokens=args.verify_max_new_tokens,
-        max_input_tokens=args.verify_max_input_tokens,
+        text_col=args.text_col,
+        batch_size=args.pass2_batch_size,
+        temperature=args.pass2_temperature,
+        max_new_tokens=args.pass2_max_new_tokens,
+        max_input_tokens=args.pass2_max_input_tokens,
     )
     df = run_llm_dataframe(
         df=df,
-        cfg=verify_cfg,
+        cfg=pass2_cfg,
         client=client,
-        system_prompt=VERIFY_SYSTEM_PROMPT,
-        select_mask_fn=lambda df_: df_["source_category_draft"].notna() & df_["source_category_justification"].notna(),  # defense in depth: parse_draft_labeled already guarantees these travel together
-        build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
-        parse_fn=parse_verify_output,
-        output_cols=FINAL_COLS,
-        skip_if_already_filled="source_category",
+        system_prompt=PASS2_SYSTEM_PROMPT,
+        select_mask_fn=lambda df_: df_["source_category_draft"].notna() & df_["source_category_justification"].notna(),
+        build_prompt_fn=lambda row, col: build_pass2_prompt(row, col),
+        parse_fn=parse_pass2_output,
+        output_cols=PASS2_COLS,
+        skip_if_already_filled="source_category_pass2_answer",
         checkpoint_path=checkpoint_path,
-        checkpoint_every=100,
+        checkpoint_every=50,
     )
+
+    # Pass 2 said YES: pass 1's draft is confirmed, finalize it directly.
+    yes_mask = df["source_category_pass2_answer"] == "YES"
+    df.loc[yes_mask, "source_category"] = df.loc[yes_mask, "source_category_draft"]
+    print(f"[pass2] YES (confirmed): {int(yes_mask.sum()):,} rows finalized from the draft", flush=True)
+
+    # --- Pass 3: only for pass-2 NO rows. Reads ONLY
+    # source_category_pass2_justification (never the article again) and
+    # reclassifies into the same 6 categories. ---
+    no_mask = df["source_category_pass2_answer"] == "NO"
+    print(f"[pass2] NO (rejected): {int(no_mask.sum()):,} rows sent to pass 3", flush=True)
+
+    pass3_cfg = RunConfig(
+        id_col="__index__",
+        text_col="source_category_pass2_justification",
+        batch_size=args.pass3_batch_size,
+        temperature=args.pass3_temperature,
+        max_new_tokens=args.pass3_max_new_tokens,
+        max_input_tokens=args.pass3_max_input_tokens,
+    )
+    df = run_llm_dataframe(
+        df=df,
+        cfg=pass3_cfg,
+        client=client,
+        system_prompt=PASS3_SYSTEM_PROMPT,
+        select_mask_fn=lambda df_: (df_["source_category_pass2_answer"] == "NO") & df_["source_category_pass2_justification"].notna(),
+        build_prompt_fn=lambda row, col: build_pass3_prompt(row, col),
+        parse_fn=parse_pass3_output,
+        output_cols=PASS3_COLS,
+        skip_if_already_filled="source_category_pass3",
+        checkpoint_path=checkpoint_path,
+        checkpoint_every=50,
+    )
+    df.loc[no_mask, "source_category"] = df.loc[no_mask, "source_category_pass3"]
+
+    n_pass2_unparsed = int((build_mask(df, text_col=args.text_col) & df["source_category_draft"].notna()
+                             & df["source_category_justification"].notna() & df["source_category_pass2_answer"].isna()).sum())
+    n_pass3_unparsed = int((no_mask & df["source_category_pass3"].isna()).sum())
+    if n_pass2_unparsed or n_pass3_unparsed:
+        print(
+            f"[verify] WARNING: {n_pass2_unparsed:,} rows unparsed at pass 2, "
+            f"{n_pass3_unparsed:,} rows unparsed at pass 3 -- source_category stays "
+            f"honestly NA for these (never finalizing an unverified answer).",
+            flush=True,
+        )
 
     # --- Save ALL rows ---
     job_id = (
@@ -384,7 +480,9 @@ def main() -> int:
     disagree = int((df.loc[both, "source_category_draft"] != df.loc[both, "source_category"]).sum())
     print(f"Saved: {parquet_path} | {len(df):,} rows total | NA: {na_count:,} | "
           f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
-          f"forced (no real verification): {forced:,}")
+          f"forced (no real verification): {forced:,} | "
+          f"pass2 YES/NO: {int(yes_mask.sum()):,}/{int(no_mask.sum()):,} | "
+          f"pass3 resolved: {int((no_mask & df['source_category_pass3'].notna()).sum()):,}/{int(no_mask.sum()):,}")
     print(counts.to_string())
 
     if Path(checkpoint_path).exists():

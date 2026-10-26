@@ -112,6 +112,42 @@ institutional position wins the tie-break whenever one is present,
 matching what the gold data actually does. Politician, Interest Group,
 Civil Servant, General Public keep their relative order after it; Other
 remains the fallback.
+
+2026-10-26 rewrite -- three-pass design, replacing the old pass 2: a
+category-by-category review of job66528291's 32 remaining errors found
+that the old pass 2 (classify a one-sentence justification, no article)
+was barely net-positive (+1 row out of 68) and, more importantly, was
+structurally unable to catch the dominant failure mode: pass 1 picking
+the wrong ACTOR among several candidates in the same article. A pass that
+never sees the article cannot notice that pass 1 described the wrong
+actor in its one-sentence summary -- it can only re-classify whatever
+description it is handed, right or wrong.
+
+The fix gives pass 2 a different, narrower job it can actually do with
+the article in hand: not "what category is the actor in this
+description" (unseen article, 6-way choice) but "is it actually true
+that {keyword} is criticized by a {category}, in this article" (full
+article, YES/NO). Pass 2 is deliberately NOT told which specific person
+or institution pass 1 named -- only the bare category word -- so it
+reads the article fresh rather than rubber-stamping (or anchoring on)
+pass 1's specific actor choice; CATEGORY_PHRASE below turns the bare
+label into a short, natural phrase ("a politician", "the general
+public", ...) for that one sentence.
+
+Pass 3 only runs on the rows pass 2 rejected (NO). It mirrors the old
+pass 2's shape -- a 6-way classification from text alone, no article --
+but the text it reads is pass 2's rejection explanation (why the stated
+category does not hold up), not pass 1's original justification, and the
+framing is rewritten accordingly ("a reviewer rejected the first
+conclusion, here is why" rather than "here is a description of who is
+criticizing"). It keeps the SAME six-category ordered legend as
+SYSTEM_PROMPT for consistency, and keeps all 6 options open (including
+the one pass 2 just rejected) rather than excluding it, since pass 2's
+NO is not assumed to be perfectly reliable either.
+
+Final answer: pass 1's draft category when pass 2 answers YES; pass 3's
+category when pass 2 answers NO; NA when either pass fails to parse --
+matching the existing policy of never finalizing an unverified answer.
 """
 from __future__ import annotations
 import pandas as pd
@@ -218,27 +254,101 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
 
 
-# --- Pass 2 (verify): classify the pass-1 justification alone, without the
-# article. See src/verify_utils.py for why this second pass exists.
-#
-# Unlike step 3/4a/5/6 (binary choice), this is a 6-way classification --
-# the verify system prompt repeats the same ordered decision procedure as
-# SYSTEM_PROMPT above (kept in sync through the 2026-09-30 and 2026-10-22
-# rewrites) so the second pass applies the same category boundaries, even
-# though it only sees a one-sentence description instead of the article. ---
+# --- Shared across pass 2 and pass 3: turn a bare category label into a
+# short, natural phrase for "criticized by {phrase}" -- pass 2 never shows
+# the model pass 1's own wording for this, specifically so it reads the
+# article fresh instead of anchoring on pass 1's actor choice. Falls back
+# to a lowercased version of the label itself for any value not in this
+# map (defensive only -- every pass-1 draft is already restricted to
+# these six, via VERIFY_LABELS in scripts/step4b_source_category.py). ---
 
-VERIFY_SYSTEM_PROMPT = """\
-You are a media analysis assistant. Another analyst has already read a
-newspaper article and written a one-sentence description of who is making
-a criticism against a specific target. You are not shown the article
-itself -- your only task is to read that description and classify the
-actor it describes into ONE of the following six categories.
+CATEGORY_PHRASE = {
+    "Administrative Unit of the State": "an administrative unit of the state",
+    "Politician": "a politician",
+    "Interest Group": "an interest group",
+    "Civil Servant": "a civil servant",
+    "General Public": "a member of the general public",
+    "Other": "a source that does not match any of the other categories",
+}
 
-For the actor described, ask first: IN WHOSE NAME are they speaking --
-their own, their institution's, an organization's, or no one's in
-particular? That question is what separates the categories below. Go
-through them IN ORDER and stop at the first one that fits -- do not skip
-ahead.
+
+def _category_phrase(draft_category: object) -> str:
+    cat = "" if pd.isna(draft_category) else str(draft_category).strip()
+    return CATEGORY_PHRASE.get(cat, cat.lower() if cat else "the stated source")
+
+
+# --- Pass 2 (verify, 2026-10-26 design): reads the FULL ARTICLE again,
+# together with pass 1's bare category label (never its justification or
+# the specific actor it named), and answers YES/NO to "is {keyword}
+# genuinely criticized by {category}, in this article". See the 2026-10-26
+# changelog entry above for why this replaces the old classify-from-
+# justification pass 2. Binary + justification, same output shape as
+# step 3/4a/5/6's own pass 1 -- parsed with the same
+# src/verify_utils.py:parse_draft_labeled helper. ---
+
+PASS2_SYSTEM_PROMPT = """\
+You are a media analysis assistant specialised in Swiss public affairs.
+You are given a newspaper article in which a specific target is
+criticized. An automatic classifier has already read this same article
+and concluded what TYPE of source is behind that criticism. Your task is
+to read the article yourself, independently, and judge whether that
+conclusion actually holds up.
+
+Answer YES only if the article genuinely shows a source of the stated
+type criticizing the target as the central critic. Answer NO if the real
+central critic is of a different kind, or if no such source is clearly
+identifiable in the article at all.
+
+First explain your reasoning in one or two sentences, then answer YES or
+NO alone on the final line.\
+"""
+
+PASS2_USER_TEMPLATE = """\
+In the article below, "{keyword}" is criticized. An automatic classifier \
+concluded that, in this article, "{keyword}" is criticized by {category_phrase}.
+
+ARTICLE:
+{article_text}
+
+Is that conclusion accurate? Explain your reasoning in one or two \
+sentences, then answer YES or NO alone on the final line.\
+"""
+
+
+def build_pass2_prompt(row: pd.Series, text_col: str) -> str:
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    category_phrase = _category_phrase(row.get("source_category_draft"))
+    return PASS2_USER_TEMPLATE.format(keyword=keyword, article_text=article_text, category_phrase=category_phrase)
+
+
+# --- Pass 3 (2026-10-26 design): only runs on rows pass 2 answered NO.
+# Reads ONLY pass 2's rejection justification (never the article again,
+# never pass 1's original justification) and reclassifies into one of the
+# same six categories -- same shape as the OLD pass 2, and keeps the same
+# ordered "in whose name" legend as SYSTEM_PROMPT/PASS2 for consistency,
+# but the framing is rewritten for what this text actually is: a
+# rejection explanation, not a plain description of who is criticizing.
+# All 6 options stay open, including the one pass 2 just rejected --
+# pass 2's NO is a second opinion, not assumed to be perfectly reliable
+# either. ---
+
+PASS3_SYSTEM_PROMPT = """\
+You are a media analysis assistant. An automatic classifier was tasked
+with determining, for a criticism made against a specific target in a
+newspaper article, who is behind that criticism -- in terms of one of six
+broad source categories. A reviewer has already re-checked the
+classifier's first conclusion against the article and rejected it,
+explaining why it does not hold up. You are not shown the article itself
+-- your only task is to read that rejection and determine the correct
+category from the same six options.
+
+For the actor described or implied in the rejection, ask first: IN WHOSE
+NAME are they speaking -- their own, their institution's, an
+organization's, or no one's in particular? That question is what
+separates the categories below. Go through them IN ORDER and stop at the
+first one that fits -- do not skip ahead.
 
 1. Administrative Unit of the State — the criticism is presented as the
    FORMAL POSITION of a state institution, at any level -- a department,
@@ -273,26 +383,29 @@ ahead.
    formerly state-employed person (other than a former politician) with
    no current institutional role.
 
-6. Other — use only when the description does not clearly identify an
-   actor, or the criticism's source is described as vague/unnamed. Do not
+6. Other — use only when the rejection does not clearly identify an
+   actor, or describes the criticism's source as vague/unnamed. Do not
    use Other merely because the actor's exact role feels ambiguous -- work
    through categories 1-5 first.\
 """
 
-VERIFY_USER_TEMPLATE = """\
-Here is a description, written by another analyst, of who is criticizing "{keyword}" in a newspaper article:
-"{justification}"
+PASS3_USER_TEMPLATE = """\
+An automatic classifier concluded that, in a newspaper article, "{keyword}" \
+was criticized by {category_phrase}. A reviewer re-read the article and \
+rejected this conclusion, explaining:
+"{pass2_justification}"
 
-Based solely on this description, answer with exactly one of these category names, and nothing else:
+Based on this explanation alone, answer with exactly one of these category names, and nothing else:
 Administrative Unit of the State, Politician, Interest Group, Civil Servant, General Public, Other.\
 """
 
 
-def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+def build_pass3_prompt(row: pd.Series, justification_col: str) -> str:
     alias = row.get("matched_alias", None)
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    category_phrase = _category_phrase(row.get("source_category_draft"))
     justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
-    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)
+    return PASS3_USER_TEMPLATE.format(keyword=keyword, category_phrase=category_phrase, pass2_justification=justification)
 
 
 # --- Last resort (force): a bare category decision, no justification asked
@@ -302,9 +415,9 @@ def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
 # to stop a row from being silently dropped, not to produce a reasoned
 # judgment. Any row answered this way is flagged via source_category_forced
 # = "TRUE" (see scripts/step4b_source_category.py) and never goes through
-# pass 2, since there is no justification to verify. Left unchanged through
-# the 2026-09-29, 2026-09-30 and 2026-10-22 updates since it affects a small
-# fraction of rows and is deliberately kept minimal.
+# pass 2/3, since there is no justification to verify. Left unchanged
+# through every prompt revision since it affects a small fraction of rows
+# and is deliberately kept minimal.
 
 FORCE_SYSTEM_PROMPT = """\
 You are a media analysis assistant. Answer with exactly one category name, nothing else.\
