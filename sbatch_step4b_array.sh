@@ -33,18 +33,28 @@ MODEL_PATH=/reference/LLM/swiss-ai/Apertus-8B-Instruct-2509
 DTYPE=bf16
 BACKEND=transformers
 
-# Inference
+# Inference -- Pass 1 (draft) : lit l'article complet
 BATCH_SIZE=8
 MAX_NEW_TOKENS=90     # justification (1 phrase) + categorie (la plus longue = 'Administrative Unit of the State')
 MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 
-# Pass 2 (verify) -- reads only the pass-1 justification, not the article,
-# so it needs a much smaller batch/context than pass 1 above.
-VERIFY_BATCH_SIZE=16
-VERIFY_MAX_NEW_TOKENS=12
-VERIFY_MAX_INPUT_TOKENS=512
-VERIFY_TEMPERATURE=0.0
+# Pass 2 (verify, AVEC l'article) -- 2026-10-26 redesign : relit l'article
+# complet + la seule categorie brute du pass 1 (jamais la justification, ni
+# l'acteur nomme), et repond OUI/NON. Meme gabarit que pass 1 puisqu'il relit
+# l'article (mais sortie plus courte : explication + OUI/NON).
+PASS2_BATCH_SIZE=8
+PASS2_MAX_NEW_TOKENS=90
+PASS2_MAX_INPUT_TOKENS=16384
+PASS2_TEMPERATURE=0.0
+
+# Pass 3 (reclassification, UNIQUEMENT pour les NON du pass 2) -- ne lit que
+# la justification du rejet du pass 2 (jamais l'article), reclasse parmi les
+# 6 categories. Gabarit court, identique a l'ancien pass 2 a justification.
+PASS3_BATCH_SIZE=16
+PASS3_MAX_NEW_TOKENS=12
+PASS3_MAX_INPUT_TOKENS=512
+PASS3_TEMPERATURE=0.0
 
 # Pass 1 retries + last-resort force -- every eligible row is now supposed
 # to come out of this step with a real answer (see src/verify_utils.py and
@@ -85,7 +95,8 @@ echo "INPUT=${INPUT} | OUTPUT_BASE=${OUTPUT_BASE}"
 echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID}"
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
-echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
+echo "PASS2_BATCH=${PASS2_BATCH_SIZE} | PASS2_MAX_NEW_TOKENS=${PASS2_MAX_NEW_TOKENS} | PASS2_MAX_INPUT_TOKENS=${PASS2_MAX_INPUT_TOKENS} | PASS2_TEMP=${PASS2_TEMPERATURE}"
+echo "PASS3_BATCH=${PASS3_BATCH_SIZE} | PASS3_MAX_NEW_TOKENS=${PASS3_MAX_NEW_TOKENS} | PASS3_MAX_INPUT_TOKENS=${PASS3_MAX_INPUT_TOKENS} | PASS3_TEMP=${PASS3_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
 
 python scripts/step4b_source_category.py \
@@ -101,10 +112,14 @@ python scripts/step4b_source_category.py \
   --max_new_tokens    "$MAX_NEW_TOKENS" \
   --max_input_tokens  "$MAX_INPUT_TOKENS" \
   --temperature       "$TEMPERATURE" \
-  --verify_batch_size       "$VERIFY_BATCH_SIZE" \
-  --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
-  --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
-  --verify_temperature      "$VERIFY_TEMPERATURE" \
+  --pass2_batch_size       "$PASS2_BATCH_SIZE" \
+  --pass2_max_new_tokens   "$PASS2_MAX_NEW_TOKENS" \
+  --pass2_max_input_tokens "$PASS2_MAX_INPUT_TOKENS" \
+  --pass2_temperature      "$PASS2_TEMPERATURE" \
+  --pass3_batch_size       "$PASS3_BATCH_SIZE" \
+  --pass3_max_new_tokens   "$PASS3_MAX_NEW_TOKENS" \
+  --pass3_max_input_tokens "$PASS3_MAX_INPUT_TOKENS" \
+  --pass3_temperature      "$PASS3_TEMPERATURE" \
   --draft_max_retries       "$DRAFT_MAX_RETRIES" \
   --retry_temperature       "$RETRY_TEMPERATURE" \
   --num_tasks         "$NUM_TASKS"

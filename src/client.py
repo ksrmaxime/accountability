@@ -197,3 +197,134 @@ class TransformersClient:
             left  = self._generate_with_fallback(prompts[:mid],  do_sample, temperature, max_new_tokens, max_input_tokens)
             right = self._generate_with_fallback(prompts[mid:], do_sample, temperature, max_new_tokens, max_input_tokens)
             return left + right
+
+    # ------------------------------------------------------------------
+    # Logit-probing (NO generation) — 2026-10-26+ step4b redesign.
+    # Reads the model's raw next-token logits for a small set of
+    # candidate single-token answers (e.g. "A"/"B") instead of generating
+    # text. See src/step4b_logit_prompts.py and src/step4b_logit_utils.py
+    # for how this is turned into calibrated, order-debiased probabilities,
+    # and scripts/check_step4b_logit_tokens.py to verify candidate letters
+    # tokenize as expected before relying on this.
+    # ------------------------------------------------------------------
+    def logprob_many(
+        self,
+        system_prompt: str,
+        user_prompts: List[str],
+        candidate_letters: List[str],
+        max_input_tokens: int = 7168,
+    ) -> List[dict]:
+        """One forward pass per prompt (never a generation loop): returns,
+        for each prompt, a dict {letter: raw_logit} for exactly the given
+        candidate letters' next-token logits -- NOT yet probabilities (the
+        restricted softmax lives in src/step4b_logit_utils.softmax_restricted,
+        kept separate from this backend-specific I/O code).
+
+        Each candidate letter must tokenize to a SINGLE token for this
+        tokenizer -- checked eagerly on first use (and cached): a mismatch
+        raises immediately rather than silently reading the wrong token's
+        logit.
+        """
+        if not user_prompts:
+            return []
+
+        if self._backend != "transformers":
+            raise NotImplementedError(
+                "logprob_many is only implemented for backend='transformers' (direct "
+                "access to raw model logits via model(**enc).logits). The 'vllm' backend "
+                "would need its own implementation, e.g. via "
+                "SamplingParams(prompt_logprobs=0) -- not done here since this cluster "
+                "currently runs step4b with backend='transformers'."
+            )
+
+        candidate_ids = [self._single_token_id(letter) for letter in candidate_letters]
+
+        prompts = []
+        for up in user_prompts:
+            msgs = []
+            if system_prompt:
+                msgs.append({"role": "system", "content": system_prompt})
+            msgs.append({"role": "user", "content": up})
+            prompts.append(
+                self.tok.apply_chat_template(
+                    msgs,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+
+        # Sort by length to minimise padding waste -- same convention as
+        # _generate_transformers.
+        pairs = sorted(enumerate(prompts), key=lambda x: len(self.tok.encode(x[1])))
+        sorted_indices = [p[0] for p in pairs]
+        sorted_prompts = [p[1] for p in pairs]
+
+        sorted_results = self._logprob_with_fallback(
+            sorted_prompts, candidate_letters, candidate_ids, max_input_tokens
+        )
+
+        results = [None] * len(prompts)
+        for orig_idx, result in zip(sorted_indices, sorted_results):
+            results[orig_idx] = result
+        return results
+
+    def _single_token_id(self, letter: str) -> int:
+        cache = getattr(self, "_single_token_cache", None)
+        if cache is None:
+            cache = {}
+            self._single_token_cache = cache
+        if letter in cache:
+            return cache[letter]
+        ids = self.tok.encode(letter, add_special_tokens=False)
+        if len(ids) != 1:
+            raise ValueError(
+                f"Candidate letter {letter!r} does not encode to a single token for this "
+                f"tokenizer (got {len(ids)} token ids: {ids}). logprob_many requires every "
+                f"candidate letter to be exactly one token -- run "
+                f"scripts/check_step4b_logit_tokens.py first to find letters that work."
+            )
+        cache[letter] = ids[0]
+        return ids[0]
+
+    def _logprob_with_fallback(self, prompts, candidate_letters, candidate_ids, max_input_tokens):
+        """Mirrors _generate_with_fallback's OOM-split-and-retry pattern,
+        but for a single forward pass (no generation loop, so no
+        max_new_tokens/do_sample/temperature to pass)."""
+        if not prompts:
+            return []
+
+        try:
+            enc = self.tok(
+                prompts,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_input_tokens,
+                padding=True,
+            )
+            enc = {k: v.to(self.model.device) for k, v in enc.items()}
+
+            with self.torch.inference_mode():
+                out = self.model(**enc)
+                # padding_side="left" (set in _init_transformers) means
+                # column -1 is the next-token-to-predict position for
+                # EVERY row in the batch, regardless of each prompt's
+                # real (unpadded) length.
+                next_token_logits = out.logits[:, -1, :]
+                candidate_logits = next_token_logits[:, candidate_ids]
+
+            results = [dict(zip(candidate_letters, row)) for row in candidate_logits.tolist()]
+
+            del enc, out, next_token_logits, candidate_logits
+            self.torch.cuda.empty_cache()
+            return results
+
+        except self.torch.cuda.OutOfMemoryError:
+            self.torch.cuda.empty_cache()
+            if len(prompts) == 1:
+                print("[OOM] Single prompt exceeds GPU memory even alone, skipping (logprob_many).", flush=True)
+                return [{letter: float("nan") for letter in candidate_letters}]
+            mid = len(prompts) // 2
+            print(f"[OOM] Batch of {len(prompts)} -> retrying as {mid} + {len(prompts) - mid} (logprob_many)", flush=True)
+            left = self._logprob_with_fallback(prompts[:mid], candidate_letters, candidate_ids, max_input_tokens)
+            right = self._logprob_with_fallback(prompts[mid:], candidate_letters, candidate_ids, max_input_tokens)
+            return left + right
