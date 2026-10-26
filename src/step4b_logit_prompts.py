@@ -82,6 +82,49 @@ they speaking" test), but rewritten as STANDALONE paragraphs: the old
 "ordered decision procedure, stop at first match" framing doesn't apply
 here, since every category is now asked about independently and
 symmetrically rather than checked in sequence.
+
+2026-10-26 "boundary sharpening" addition: job66603934 (summarize-then-
+probe) reached 65.2% accuracy (vs 49.3% for direct-article logit-probing
+and 52.9% for the 3-pass design) -- a real jump, with mean margin up from
+0.088 to 0.298. A row-by-row read of its 24 errors against their
+source_summary text showed that roughly half of them were genuine
+PASS-2 misclassifications (the summary already contained the correct,
+unambiguous signal) rather than the summary itself having picked the
+wrong source -- the latter is a pass-1/gold-adaptation question, left
+alone here. Three concrete, recurring boundary bugs accounted for most
+of the pass-2 misses, each now addressed by a targeted edit below
+(definitions/examples only, no change to the overall architecture or to
+SUMMARY_TEMPLATE):
+
+ (a) 'Other' was being predicted even when the summary named a specific
+     person, group, or outlet as the critic -- directly contradicting
+     Other's own "vague or unnamed source" definition (6/24 errors, e.g.
+     a named economist, a named activist, a named media outlet). Fix:
+     Other's definition now explicitly forbids this, and media/press is
+     added to Interest Group's list of organized-entity types.
+ (b) An elected official or appointed civil servant explaining/
+     defending their own actions "in an official capacity" was
+     repeatedly read as 'Administrative Unit of the State', when the
+     correct category (Politician / Civil Servant) requires only that
+     the article does NOT present it as a formal, collective
+     institutional statement (~5/24 errors). Fix: added an explicit
+     tie-break to all three of these categories' definitions.
+ (c) A company executive discussing policy (UBS's CEO on bank capital
+     rules) was read as 'Politician' -- a clean, confident
+     misclassification despite an unambiguous summary. Fix: Politician's
+     definition now explicitly excludes business executives (routed to
+     Interest Group instead), reinforced with a matching canonical
+     example.
+
+Also scoped 'Politician' to Swiss office-holders only (a foreign head of
+state/minister does not qualify -- see the new narrow clause in
+'Other'), and added "political commentator/analyst" to General Public's
+definition and examples, after a named independent analyst was
+misclassified as Other. Deliberately NOT touched: SUMMARY_TEMPLATE
+itself, and the handful of errors traced to the summary locking onto a
+different (but real) critic than the one gold used -- those are being
+evaluated for a gold-label adaptation instead, since the logit-probing
+read of the summary was correct in those cases.
 """
 from __future__ import annotations
 
@@ -106,7 +149,14 @@ CATEGORY_DEFINITION = {
         "regulatory/oversight agency. This includes an official report, audit, ruling or "
         "communique, and ALSO a named individual (a spokesperson, a director, or even an "
         "elected executive member) speaking explicitly IN THE NAME of that institution, "
-        "rather than giving a personal opinion."
+        "rather than giving a personal opinion. Reserve this category for a genuinely "
+        "FORMAL, COLLECTIVE statement -- a press release, an official report, a ruling, "
+        "or a spokesperson explicitly presenting the institution's own position. Merely "
+        "holding an official job title, or explaining/defending one's own actions 'in an "
+        "official capacity', is NOT enough by itself: if a specific named person is "
+        "really just giving their own account or opinion rather than the institution's "
+        "formal position, prefer 'Politician' (if they hold elected/appointed political "
+        "office) or 'Civil Servant' (if they are an appointed state employee) instead."
     ),
     "Politician": (
         "An elected or appointed political office-holder (a federal, cantonal or communal "
@@ -115,33 +165,60 @@ CATEGORY_DEFINITION = {
         "own opinion or stance, not their institution's official position. A political "
         "party issuing its own collective statement also counts, as does a FORMER elected "
         "politician commenting on public affairs -- their political identity does not "
-        "disappear on retirement."
+        "disappear on retirement. Restricted to SWISS political office-holders (federal, "
+        "cantonal, or communal) -- a foreign head of state, minister, or politician does "
+        "NOT qualify here, even if clearly named and clearly political in their own "
+        "country (see 'Other'). This also excludes business executives, company "
+        "spokespeople, or other representatives of a private company or economic "
+        "interest commenting on economic, financial, or regulatory policy -- even when "
+        "the topic is a government decision -- route those to 'Interest Group' instead. "
+        "This category takes priority over 'Administrative Unit of the State' whenever "
+        "the elected official is giving their own assessment or opinion, even one "
+        "phrased around their official duties, UNLESS the article explicitly presents "
+        "it as a formal, collective institutional statement."
     ),
     "Interest Group": (
         "The actor speaks FOR an organized entity representing a particular interest: a "
         "private company, a business or professional association, a union, a lobby group, "
-        "a think tank, an NGO, or an organized advocacy/protest group -- even an informal "
-        "one, as long as it acts as a collective, not a lone individual. This excludes "
-        "political parties/politicians and state administrations."
+        "a think tank, an NGO, a media outlet or journalistic investigation, or an "
+        "organized advocacy/protest group -- even an informal one, as long as it acts as "
+        "a collective, not a lone individual. This excludes political parties/politicians "
+        "and state administrations. Also includes a business executive or company "
+        "representative commenting on economic, financial, or regulatory matters, even "
+        "when framed as a personal view -- their professional/economic interest counts "
+        "as the organized entity here."
     ),
     "Civil Servant": (
         "A specific, named individual CURRENTLY employed by the state (an official, "
         "auditor, diplomat, police officer, etc.) gives their OWN personal opinion or "
         "account, explicitly NOT as their institution's formal position. A retired or "
-        "former official with no current state role does NOT qualify here."
+        "former official with no current state role does NOT qualify here. This "
+        "category takes priority over 'Administrative Unit of the State' whenever a "
+        "named, currently-employed official is giving their own account or opinion -- "
+        "even one framed using their job title or official duties -- UNLESS the "
+        "article explicitly presents it as the institution's own formal, collective "
+        "position."
     ),
     "General Public": (
         "An individual speaking only for themselves, with no institution or organized "
         "interest behind them: an ordinary citizen, a survey respondent, an independent "
-        "expert or researcher with no organizational affiliation, or a formerly "
-        "state-employed person (other than a former politician) with no current "
-        "institutional role."
+        "expert, researcher, or political commentator/analyst with no organizational "
+        "affiliation, or a formerly state-employed person (other than a former "
+        "politician) with no current institutional role."
     ),
     "Other": (
         "Used ONLY when a criticism is clearly present in the article but its source is "
         "vague or unnamed -- e.g. the article says someone 'has faced mounting criticism "
         "in recent weeks' without identifying who is criticizing, and the journalist is "
-        "not taking personal ownership of the claim either."
+        "not taking personal ownership of the claim either. Do NOT use this category "
+        "just because a named source's precise organizational nature is unclear, or "
+        "because several different critics are mentioned together -- if the article "
+        "names ANY specific person, group, or outlet as the source, pick whichever of "
+        "the other five categories fits best instead. The one other valid use of this "
+        "category: the source IS clearly named but is a foreign government or "
+        "political actor outside Switzerland's own public institutions (e.g. a foreign "
+        "head of state or minister) -- a case the other five categories, being "
+        "Swiss-specific, cannot otherwise capture."
     ),
 }
 
@@ -168,8 +245,9 @@ CANONICAL_EXAMPLES = {
     "Interest Group": [
         "A spokesperson for a national business association criticizes a proposed "
         "regulation on behalf of its member companies.",
-        "An environmental NGO issues a statement condemning a construction project as "
-        "damaging to local wildlife.",
+        "A bank's CEO personally argues against proposed capital-requirement "
+        "regulations that would affect his company, even though he is speaking in his "
+        "own words rather than reading an official press release.",
     ],
     "Civil Servant": [
         "A currently serving police officer, in a personal interview, says she is "
@@ -182,8 +260,10 @@ CANONICAL_EXAMPLES = {
     "General Public": [
         "A local resident tells a journalist that construction noise near her home has "
         "made daily life unbearable.",
-        "An independent economist with no organizational affiliation argues in an opinion "
-        "piece that a proposed tax reform is poorly designed.",
+        "An independent economist or political commentator, with no organizational "
+        "affiliation, publishes an opinion piece or analysis arguing that a proposed "
+        "policy -- or the performance of a group of officials -- is poorly designed or "
+        "underwhelming.",
     ],
     "Other": [
         "The article states that a company 'has faced mounting criticism in recent weeks' "
