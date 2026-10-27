@@ -1,6 +1,19 @@
 # src/client.py
 from __future__ import annotations
 
+import os
+
+# 2026-10-27 determinism fix -- MUST be set before the first CUDA context is
+# created (i.e. before torch is imported anywhere in the process), which is
+# why this sits at module level rather than inside _init_transformers: this
+# module is imported first by every step4b entry point. Required by
+# torch.use_deterministic_algorithms(True) below for cuBLAS matmul kernels
+# to use a deterministic (if slightly slower) algorithm instead of whichever
+# is fastest for the given shapes -- see
+# https://docs.pytorch.org/docs/stable/notes/randomness.html. setdefault()
+# so an operator-set value in the sbatch environment is never overridden.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 from dataclasses import dataclass
 from typing import List
 
@@ -52,6 +65,31 @@ class TransformersClient:
         self._backend = "transformers"
         self.torch = torch
 
+        # 2026-10-27 determinism fix -- diagnosing why two runs over the
+        # EXACT SAME input parquet (confirmed byte-identical) produced
+        # different source_summary text for 61/70 rows between job66608678
+        # and job66620028, despite temperature=0.0 (do_sample=False,
+        # confirmed correct below) on both. Root cause candidate: nothing
+        # here forced deterministic GPU kernels, so the default attention
+        # backend (SDPA, which can itself dispatch to flash-attention /
+        # memory-efficient kernels) and cuBLAS matmuls are only
+        # deterministic UP TO FLOATING-POINT REDUCTION ORDER, which is not
+        # fixed run-to-run on GPU. In bf16 (narrow mantissa -> more frequent
+        # near-ties between candidate next-tokens) over a 220-token
+        # autoregressive generation, a single such tie flipping early is
+        # enough to send the rest of the generated text in a different
+        # direction entirely -- this is a documented limitation of GPU
+        # inference, not something specific to Apertus or to this pipeline.
+        # warn_only=True rather than strict: some ops genuinely have no
+        # deterministic GPU implementation (e.g. certain KV-cache index ops
+        # used inside generate()'s decode loop) and would otherwise raise
+        # and kill the whole SLURM array task; eager attention (below) and
+        # the CUBLAS_WORKSPACE_CONFIG env var (top of this file) are what
+        # actually remove the two most relevant sources of nondeterminism
+        # for a plain causal-LM forward pass under inference_mode -- this
+        # call catches anything else and logs a warning instead of crashing.
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
         self.tok = AutoTokenizer.from_pretrained(
             cfg.model_path,
             trust_remote_code=cfg.trust_remote_code,
@@ -78,6 +116,15 @@ class TransformersClient:
             trust_remote_code=cfg.trust_remote_code,
             dtype=dtype,
             device_map="auto",
+            # 2026-10-27 determinism fix -- without this, transformers picks
+            # SDPA by default, which itself dispatches to flash-attention or
+            # memory-efficient CUDA kernels depending on the input shapes;
+            # both are fast but explicitly NOT guaranteed bit-reproducible
+            # run-to-run (documented upstream). "eager" computes attention
+            # with plain, deterministic matmul/softmax ops instead -- slower,
+            # but removes the single most likely source of the run-to-run
+            # summary drift this is meant to fix.
+            attn_implementation="eager",
         ).eval()
 
     # ------------------------------------------------------------------
