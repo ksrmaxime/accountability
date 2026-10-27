@@ -76,6 +76,29 @@ since an empty article resembles a vague/unnamed-source article by
 construction. Worth watching in the per-category QA, same as the
 reference doc's own "no mechanism" caveat.
 
+2026-10-27 "validate-and-correct" addition: a diagnostic read of
+job66608678's 69-row population found that swapping every WRONG row to
+pass 2's own runner-up category (2nd-highest calibrated probability)
+would recover 14 of 26 errors (62.3% -> 82.6% ceiling) -- but a blind,
+margin-based swap ("low confidence -> take runner-up") only pays off in
+a narrow band (<=0.05 margin: +3 net) and turns net NEGATIVE beyond
+~0.10, because plenty of CORRECT rows also sit at thin margins. Several
+of the recoverable errors are also NOT low-margin at all (Albert Rosti:
+p1=0.97 and still wrong) -- pass 2's 6 independent yes/no questions can
+each be confidently swayed by locally-strong but not-actually-decisive
+textual signal (lots of generic citizen language drowning out one
+specific named politician, say), a failure mode a margin threshold
+cannot see by construction. Pass 3 below asks a genuinely different
+question to catch exactly these: not "which of 6 categories fits best"
+but "pass 2 concluded category Y -- true or false", in ONE holistic
+read of the same summary, instead of 6 independent isolated ones. Where
+pass 3 says false, the row falls back to pass 2's own runner-up rather
+than a 3rd fresh guess. Deliberately NOT the same shape as the old
+3-pass design's draft/verify/force/reclassify machinery (abandoned in
+favour of logit-probing on 2026-10-26): this is a single calibrated
+logit read, same machinery as pass 2 itself (one forward pass,
+order-swap averaging, context-free calibration), not a generation step.
+
 Category definitions below are adapted from src/step4b_prompts.py's
 SYSTEM_PROMPT (same six categories, same underlying "in whose name are
 they speaking" test), but rewritten as STANDALONE paragraphs: the old
@@ -423,3 +446,80 @@ def build_summary_prompt(row: pd.Series, text_col: str) -> str:
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
     return SUMMARY_TEMPLATE.format(keyword=keyword, article_text=article_text)
+
+
+# ---------------------------------------------------------------------------
+# Pass 3 (2026-10-27 "validate-and-correct" addition): a second
+# LOGIT-PROBING step -- same machinery as pass 2 (one forward pass,
+# order-swap averaging, context-free calibration), reading the SAME
+# summary, but asking ONE holistic question instead of 6 independent
+# ones: "pass 2 concluded the source is category Y -- true or false?".
+# See the module docstring's 2026-10-27 paragraph for why this is not
+# just pass 2 repeated, and src/step4b_source_category_logit.py's
+# compute_validation_calibration / pass-3 loop for how it's used.
+# ---------------------------------------------------------------------------
+
+VALIDATION_QUESTION_TEMPLATE = """\
+You are a media analysis assistant specialised in Swiss public affairs. In the {context_label} \
+below, "{keyword}" is criticized.
+
+{context_label}:
+{article_text}
+
+A prior automated analysis concluded that the source of this criticism belongs to the \
+following category:
+
+CLAIMED CATEGORY: {category_phrase}
+Definition: {category_definition}
+
+Question: based ONLY on the {context_label} above, is this conclusion correct -- does the \
+criticism of "{keyword}" genuinely come from {category_phrase}?
+Answer with exactly one letter and nothing else:
+{letter_true} = True
+{letter_false} = False\
+"""
+
+
+def _build_validation_prompt(
+    claimed_category: str, keyword: str, article_text: str, order: int,
+    context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """order=1 -> A=True/B=False ; order=2 -> A=False/B=True. Reuses
+    LETTERS/letters_for_order verbatim -- same letter-bias cancellation
+    as pass 2, just relabelled True/False instead of Yes/No."""
+    if order not in (1, 2):
+        raise ValueError(f"order must be 1 or 2, got {order!r}")
+    letter_true, letter_false = letters_for_order(order)
+    return VALIDATION_QUESTION_TEMPLATE.format(
+        keyword=keyword,
+        article_text=article_text,
+        context_label=context_label,
+        category_phrase=CATEGORY_PHRASE[claimed_category],
+        category_definition=CATEGORY_DEFINITION[claimed_category],
+        letter_true=letter_true, letter_false=letter_false,
+    )
+
+
+def build_validation_prompt(
+    row: pd.Series, text_col: str, claimed_category: str, order: int,
+    context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """The real, row-grounded validation question: does pass 2's own
+    chosen category for this row hold up under one holistic re-read of
+    the same summary? `claimed_category` is whatever pass 2 wrote to
+    `source_category` for this row -- the caller reads it off the row
+    and passes it in, this function doesn't look it up itself."""
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return _build_validation_prompt(claimed_category, keyword, article_text, order, context_label=context_label)
+
+
+def build_validation_calibration_prompt(
+    claimed_category: str, order: int, context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """Same empty-summary neutralisation as build_calibration_prompt, for
+    pass 3's own question shape -- measures, once per claimed category
+    (not per row), how often THIS validation question's wording defaults
+    to True independent of any real content."""
+    return _build_validation_prompt(claimed_category, CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order, context_label=context_label)

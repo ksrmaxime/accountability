@@ -32,6 +32,20 @@ set -euo pipefail
 # que l'article brut -- objectif : reduire le bruit de l'article entier, qui
 # semble avoir plafonne la precision du design direct-article (49.3%, job
 # 66603355) au niveau du 3-pass. Nouveaux parametres SUMMARY_* ci-dessous.
+# Resultat (job66603934) : 65.2% -- puis "boundary sharpening" des definitions
+# de categories (job66608678, 62.3% -- regression en bonne partie du bruit,
+# cf. src/step4b_logit_prompts.py pour le detail).
+#
+# 2026-10-27 "validate-and-correct" -- AJOUT d'une PASSE 3 : pour chaque ligne
+# resolue par la passe 2, on relit LE MEME resume avec UNE question logit
+# holistique ("la passe 2 a conclu categorie Y -- vrai ou faux ?"), meme
+# machinerie que la passe 2 (un seul forward pass, order-swap, calibration
+# propre a cette question -- voir compute_validation_calibration dans
+# scripts/step4b_source_category_logit.py). Si la passe 3 repond FAUX, la
+# ligne retombe sur le runner-up de la passe 2 (2e categorie la plus probable,
+# deja capture par l'agregation de la passe 2) plutot que sur une 3e tentative.
+# Une lecture de passe 3 inconcluante est fail-safe : le choix de la passe 2
+# est conserve tel quel. Nouveaux parametres VALIDATION_* ci-dessous.
 #
 # IMPORTANT -- a faire AVANT de lancer ce sbatch (une seule fois, rapide) :
 #   srun --pty --gres=gpu:1 --mem=24G --time=00:15:00 bash -l
@@ -77,6 +91,13 @@ MAX_INPUT_TOKENS=16384
 CANDIDATE_LETTERS=A,B   # changer ici si check_step4b_logit_tokens.py recommande une autre paire
 CHECKPOINT_EVERY=200
 
+# Passe 3 "validate-and-correct" -- meme machinerie logit que la passe 2
+# (pas de temperature/max_new_tokens), reutilise CANDIDATE_LETTERS et
+# MAX_INPUT_TOKENS ci-dessus. batch_size compte des prompts (row x ordre),
+# 2 par ligne validee -- bien moins que la passe 2 (qui en compte 12/ligne).
+VALIDATION_BATCH_SIZE=32
+VALIDATION_CHECKPOINT_EVERY=200
+
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array
 
 # =============================================================================
@@ -111,6 +132,7 @@ echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "SUMMARY_BATCH_SIZE=${SUMMARY_BATCH_SIZE} | SUMMARY_TEMPERATURE=${SUMMARY_TEMPERATURE} | SUMMARY_MAX_NEW_TOKENS=${SUMMARY_MAX_NEW_TOKENS} | SUMMARY_CHECKPOINT_EVERY=${SUMMARY_CHECKPOINT_EVERY}"
 echo "BATCH_SIZE=${BATCH_SIZE} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | CANDIDATE_LETTERS=${CANDIDATE_LETTERS}"
+echo "VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY}"
 
 python scripts/step4b_source_category_logit.py \
   --input                    "$INPUT" \
@@ -129,6 +151,8 @@ python scripts/step4b_source_category_logit.py \
   --max_input_tokens          "$MAX_INPUT_TOKENS" \
   --candidate_letters         "$CANDIDATE_LETTERS" \
   --checkpoint_every          "$CHECKPOINT_EVERY" \
+  --validation_batch_size     "$VALIDATION_BATCH_SIZE" \
+  --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
   --num_tasks                 "$NUM_TASKS"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 

@@ -57,21 +57,46 @@ same way the rest of this pipeline always has: that row is simply never
 finalized (source_category stays honestly NA), flagged via
 source_category_incomplete.
 
+2026-10-27 "validate-and-correct" addition: see src/step4b_logit_prompts.py's
+module docstring for the full diagnosis (job66608678's 69-row population,
+62.3% accuracy, +1 clean fix / -3 regressions vs the pre-boundary-sharpening
+run). Adds PASS 3: for every row pass 2 resolved, re-reads the SAME summary
+with ONE holistic "pass 2 concluded category Y -- true or false?" logit
+question (same machinery as pass 2: one forward pass, order-swap, per-
+category calibration -- see compute_validation_calibration below). Where
+pass 3 says false, the row falls back to pass 2's own RUNNER-UP category
+(2nd-highest calibrated probability, captured during pass 2's own
+aggregation loop) rather than a 3rd fresh guess. An inconclusive pass-3
+read (GPU OOM etc.) is fail-safe: pass 2's own choice is kept, not swapped
+on a signal that isn't trusted.
+
 Output columns:
-  source_summary                  -> the pre-pass's factual summary of
-                                       the criticism and its source (free
-                                       text) | NA if generation failed
-  source_category                 -> one of 6 categories | NA (FINAL)
-  source_category_p_<category>    -> calibrated probability for each of
-                                       the 6 categories (QA / diagnostics)
-  source_category_margin          -> calibrated prob of the winning
-                                       category minus the runner-up's
-                                       (a confidence signal this design
-                                       gives "for free")
-  source_category_incomplete      -> "TRUE" if the summary pre-pass
-                                       failed OR any underlying logit
-                                       read failed (GPU OOM even alone)
-                                       for this row, else NA
+  source_summary                     -> the pre-pass's factual summary of
+                                          the criticism and its source (free
+                                          text) | NA if generation failed
+  source_category                    -> one of 6 categories | NA (FINAL,
+                                          possibly pass 2's runner-up if
+                                          pass 3 rejected pass 2's choice)
+  source_category_before_validation  -> pass 2's own choice, BEFORE pass 3
+                                          -- kept for audit even when pass 3
+                                          accepts it unchanged
+  source_category_runnerup           -> pass 2's 2nd-highest-probability
+                                          category (the pass-3 fallback
+                                          target)
+  source_category_validation_p_true  -> pass 3's calibrated P(true) that
+                                          pass 2's own choice is correct
+  source_category_validated          -> "TRUE" | "FALSE" | NA (pass 3's
+                                          verdict on pass 2's choice; NA if
+                                          pass 3's read was inconclusive)
+  source_category_p_<category>       -> calibrated probability for each of
+                                          the 6 categories from PASS 2 (QA /
+                                          diagnostics; not updated by pass 3)
+  source_category_margin             -> pass 2's winning category minus its
+                                          runner-up (a confidence signal
+                                          this design gives "for free")
+  source_category_incomplete         -> "TRUE" if the summary pre-pass, ANY
+                                          pass-2 logit read, OR the pass-3
+                                          validation read failed, else NA
 
 Usage
 -----
@@ -81,7 +106,8 @@ Usage
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 \\
       --summary_batch_size 8 --summary_max_new_tokens 220 \\
-      --batch_size 32 --max_input_tokens 16384
+      --batch_size 32 --max_input_tokens 16384 \\
+      --validation_batch_size 32 --validation_checkpoint_every 200
 """
 from __future__ import annotations
 
@@ -104,6 +130,8 @@ from src.step4b_logit_prompts import (
     build_question_prompt,
     build_calibration_prompt,
     build_summary_prompt,
+    build_validation_prompt,
+    build_validation_calibration_prompt,
     letters_for_order,
 )
 from src.step4b_logit_utils import (
@@ -129,7 +157,16 @@ def _slug(category: str) -> str:
 
 PROB_COLS = [f"source_category_p_{_slug(c)}" for c in CATEGORIES]
 ALL_OUTPUT_COLS = (
-    [SUMMARY_TEXT_COL, "source_category", "source_category_margin", "source_category_incomplete"]
+    [
+        SUMMARY_TEXT_COL,
+        "source_category",
+        "source_category_margin",
+        "source_category_runnerup",
+        "source_category_before_validation",
+        "source_category_validation_p_true",
+        "source_category_validated",
+        "source_category_incomplete",
+    ]
     + PROB_COLS
 )
 
@@ -179,6 +216,43 @@ def compute_calibration(client, candidate_letters, max_input_tokens, context_lab
     return p0
 
 
+def compute_validation_calibration(client, candidate_letters, max_input_tokens, context_label: str) -> dict:
+    """p0_val(claimed_category): pass 3's own question has a different
+    shape than pass 2's (one holistic true/false claim instead of 6
+    independent yes/no ones), so it gets its own intrinsic yes("true")-
+    bias measurement, one per possible claimed category, on the same
+    empty-summary variant -- see
+    src/step4b_logit_prompts.build_validation_calibration_prompt. Same
+    cost as compute_calibration (6 categories x 2 orders = 12 forward
+    passes)."""
+    prompts = []
+    meta = []  # (claimed_category, order)
+    for cat in CATEGORIES:
+        for order in (1, 2):
+            prompts.append(build_validation_calibration_prompt(cat, order, context_label=context_label))
+            meta.append((cat, order))
+
+    raw = client.logprob_many(
+        system_prompt="",
+        user_prompts=prompts,
+        candidate_letters=candidate_letters,
+        max_input_tokens=max_input_tokens,
+    )
+
+    p_true_by_cat_order = {}
+    for (cat, order), logits_dict in zip(meta, raw):
+        probs = softmax_restricted(logits_dict)
+        letter_true, _letter_false = letters_for_order(order)
+        p_true_by_cat_order[(cat, order)] = probs.get(letter_true, float("nan"))
+
+    p0_val = {}
+    for cat in CATEGORIES:
+        p0_val[cat] = average_yes_over_orderings(
+            p_true_by_cat_order[(cat, 1)], p_true_by_cat_order[(cat, 2)]
+        )
+    return p0_val
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
 
@@ -214,6 +288,14 @@ def main() -> int:
                          "with scripts/check_step4b_logit_tokens.py before relying on them.")
     ap.add_argument("--checkpoint_every", type=int, default=200,
                     help="Save a checkpoint after every N flat (row,category,order) prompts resolved.")
+
+    # --- Pass 3 (validate-and-correct, logit-probing, no generation):
+    # one holistic true/false re-read per row pass 2 resolved, reusing
+    # --candidate_letters and --max_input_tokens from pass 2 above.
+    # batch_size here counts (row, order) prompts -- 2 per validated row. ---
+    ap.add_argument("--validation_batch_size", type=int, default=32)
+    ap.add_argument("--validation_checkpoint_every", type=int, default=200,
+                    help="Save a checkpoint after every N (row,order) validation prompts resolved.")
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -261,8 +343,9 @@ def main() -> int:
     print(f"[pipeline] {len(df):,} rows in chunk — {len(eligible_idx_all):,} SOURCED rows "
           f"eligible for the summary pre-pass (rest keep source_category = NA)")
 
-    summary_checkpoint_path = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_summary_checkpoint.parquet"
-    logit_checkpoint_path   = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_checkpoint.parquet"
+    summary_checkpoint_path    = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_summary_checkpoint.parquet"
+    logit_checkpoint_path      = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_checkpoint.parquet"
+    validation_checkpoint_path = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_validation_checkpoint.parquet"
 
     for col in ALL_OUTPUT_COLS:
         if col not in df.columns:
@@ -417,18 +500,150 @@ def main() -> int:
         if best_cat is None:
             df.at[row_idx, "source_category"] = pd.NA
             df.at[row_idx, "source_category_margin"] = pd.NA
+            df.at[row_idx, "source_category_runnerup"] = pd.NA
         else:
-            sorted_probs = sorted(valid.values(), reverse=True)
-            margin = sorted_probs[0] - (sorted_probs[1] if len(sorted_probs) > 1 else 0.0)
+            ranked = sorted(valid.items(), key=lambda kv: kv[1], reverse=True)
+            runner_up_cat = ranked[1][0] if len(ranked) > 1 else pd.NA
+            margin = ranked[0][1] - (ranked[1][1] if len(ranked) > 1 else 0.0)
             df.at[row_idx, "source_category"] = best_cat
             df.at[row_idx, "source_category_margin"] = margin
+            df.at[row_idx, "source_category_runnerup"] = runner_up_cat
+            df.at[row_idx, "source_category_before_validation"] = best_cat
         if any_nan:
             df.at[row_idx, "source_category_incomplete"] = "TRUE"
 
+    n_incomplete_pass2 = int((df["source_category_incomplete"] == "TRUE").sum())
+    if n_incomplete_pass2:
+        print(f"[warning] {n_incomplete_pass2:,} rows flagged source_category_incomplete "
+              f"after pass 1+2 (failed summary pre-pass and/or a failed logit read).", flush=True)
+
+    # ---------------------------------------------------------------------
+    # Pass 3 (2026-10-27 "validate-and-correct" addition): one holistic
+    # TRUE/FALSE re-read of pass 2's own chosen category, per row pass 2
+    # actually resolved. Same logit-probing machinery as pass 2 (one
+    # forward pass, order-swap averaging, per-claimed-category
+    # calibration) but a different question shape -- see
+    # src/step4b_logit_prompts.py's VALIDATION_QUESTION_TEMPLATE and the
+    # module docstring above. Where pass 3 says FALSE, the row falls
+    # back to pass 2's own runner-up category (captured just above)
+    # rather than a fresh guess. An inconclusive pass-3 read is fail-safe
+    # -- pass 2's own choice is kept, never swapped on a signal that
+    # isn't trusted.
+    # ---------------------------------------------------------------------
+    validated_idx = [i for i in eligible_idx if pd.notna(df.at[i, "source_category"])]
+    print(f"[validation] Re-checking pass 2's chosen category for {len(validated_idx):,} "
+          f"resolved rows...", flush=True)
+
+    print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
+    p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL)
+    for cat in CATEGORIES:
+        print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
+
+    val_flat_keys = []    # (row_idx, order)
+    val_flat_prompts = []
+    for row_idx in validated_idx:
+        row = df.loc[row_idx]
+        claimed_category = df.at[row_idx, "source_category"]
+        for order in (1, 2):
+            val_flat_keys.append((row_idx, order))
+            val_flat_prompts.append(
+                build_validation_prompt(row, SUMMARY_TEXT_COL, claimed_category, order, context_label=SUMMARY_CONTEXT_LABEL)
+            )
+
+    print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
+          f"({len(validated_idx):,} rows x 2 orders)")
+
+    val_done = {}  # (row_idx, order) -> {letter: logit}
+    if Path(validation_checkpoint_path).exists():
+        ckpt = pd.read_parquet(validation_checkpoint_path)
+        for _, r in ckpt.iterrows():
+            vkey = (int(r["row_idx"]), int(r["order"]))
+            val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+        print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
+              f"{validation_checkpoint_path}", flush=True)
+
+    val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
+    print(f"[validation] {len(val_todo):,} validation prompts remaining "
+          f"({len(val_flat_prompts) - len(val_todo):,} already done)")
+
+    n_since_val_checkpoint = 0
+    for start in range(0, len(val_todo), args.validation_batch_size):
+        batch_flat_idx = val_todo[start:start + args.validation_batch_size]
+        batch_prompts = [val_flat_prompts[i] for i in batch_flat_idx]
+
+        raw = client.logprob_many(
+            system_prompt="",
+            user_prompts=batch_prompts,
+            candidate_letters=candidate_letters,
+            max_input_tokens=args.max_input_tokens,
+        )
+        for flat_idx, logits_dict in zip(batch_flat_idx, raw):
+            val_done[val_flat_keys[flat_idx]] = logits_dict
+
+        n_since_val_checkpoint += len(batch_flat_idx)
+        n_done_total = len(val_flat_prompts) - (len(val_todo) - start - len(batch_flat_idx))
+        print(f"[validation progress] {n_done_total:,}/{len(val_flat_prompts):,} prompts resolved", flush=True)
+
+        if n_since_val_checkpoint >= args.validation_checkpoint_every:
+            _save_validation_checkpoint(validation_checkpoint_path, val_done, candidate_letters)
+            n_since_val_checkpoint = 0
+
+    if val_todo:
+        _save_validation_checkpoint(validation_checkpoint_path, val_done, candidate_letters)
+
+    n_rejected = 0
+    n_val_incomplete = 0
+    for row_idx in validated_idx:
+        claimed_category = df.at[row_idx, "source_category"]
+        p_true_by_order = {}
+        val_any_nan = False
+        for order in (1, 2):
+            logits_dict = val_done.get((row_idx, order))
+            if logits_dict is None:
+                p_true_by_order[order] = float("nan")
+                val_any_nan = True
+                continue
+            probs = softmax_restricted(logits_dict)
+            letter_true, _letter_false = letters_for_order(order)
+            p_true_by_order[order] = probs.get(letter_true, float("nan"))
+            if pd.isna(p_true_by_order[order]):
+                val_any_nan = True
+
+        p_true = average_yes_over_orderings(p_true_by_order[1], p_true_by_order[2])
+        if pd.isna(p_true) or pd.isna(p0_val.get(claimed_category)):
+            val_any_nan = True
+
+        if val_any_nan:
+            # Inconclusive read -- fail safe: keep pass 2's own choice,
+            # don't swap on a signal we don't trust.
+            n_val_incomplete += 1
+            df.at[row_idx, "source_category_incomplete"] = "TRUE"
+            continue
+
+        p_true_corrected = calibrate(p_true, p0_val[claimed_category])
+        df.at[row_idx, "source_category_validation_p_true"] = p_true_corrected
+
+        if p_true_corrected >= 0.5:
+            df.at[row_idx, "source_category_validated"] = "TRUE"
+        else:
+            df.at[row_idx, "source_category_validated"] = "FALSE"
+            runner_up = df.at[row_idx, "source_category_runnerup"]
+            if pd.notna(runner_up):
+                df.at[row_idx, "source_category"] = runner_up
+                n_rejected += 1
+            # else: no runner-up available (shouldn't normally happen with
+            # 6 categories) -- keep pass 2's own choice rather than leave
+            # the row with no answer at all.
+
+    print(f"[validation] {n_rejected:,}/{len(validated_idx):,} rows rejected by pass 3 and "
+          f"swapped to pass 2's runner-up category "
+          f"({n_val_incomplete:,} validation reads inconclusive, pass 2's choice kept as-is)",
+          flush=True)
+
     n_incomplete = int((df["source_category_incomplete"] == "TRUE").sum())
-    if n_incomplete:
-        print(f"[warning] {n_incomplete:,} rows flagged source_category_incomplete "
-              f"(failed summary pre-pass and/or a failed logit read).", flush=True)
+    if n_incomplete > n_incomplete_pass2:
+        print(f"[warning] {n_incomplete:,} rows flagged source_category_incomplete in total "
+              f"(+{n_incomplete - n_incomplete_pass2:,} from inconclusive pass-3 reads).", flush=True)
 
     # --- Save ALL rows ---
     job_id = (
@@ -452,11 +667,13 @@ def main() -> int:
     counts = df["source_category"].value_counts(dropna=True)
     na_count = int(df["source_category"].isna().sum())
     avg_margin = df["source_category_margin"].dropna().astype(float).mean() if df["source_category_margin"].notna().any() else float("nan")
+    n_validated_false = int((df["source_category_validated"] == "FALSE").sum())
     print(f"Saved: {parquet_path} | {len(df):,} rows total | NA: {na_count:,} | "
-          f"incomplete: {n_incomplete:,} | avg winning margin: {avg_margin:.4f}")
+          f"incomplete: {n_incomplete:,} | avg winning margin (pass 2): {avg_margin:.4f} | "
+          f"pass-3 rejections (swapped to runner-up): {n_validated_false:,}")
     print(counts.to_string())
 
-    for p in (summary_checkpoint_path, logit_checkpoint_path):
+    for p in (summary_checkpoint_path, logit_checkpoint_path, validation_checkpoint_path):
         if Path(p).exists():
             Path(p).unlink()
             print(f"[checkpoint] Deleted {p}")
@@ -475,6 +692,19 @@ def _save_checkpoint(checkpoint_path, done, candidate_letters):
     Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
     ckpt_df.to_parquet(checkpoint_path, index=False)
     print(f"[checkpoint] Saved {len(ckpt_df):,} resolved prompts -> {checkpoint_path}", flush=True)
+
+
+def _save_validation_checkpoint(checkpoint_path, done, candidate_letters):
+    rows = []
+    for (row_idx, order), logits_dict in done.items():
+        r = {"row_idx": row_idx, "order": order}
+        for letter in candidate_letters:
+            r[f"logit_{letter}"] = logits_dict.get(letter, float("nan"))
+        rows.append(r)
+    ckpt_df = pd.DataFrame(rows)
+    Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+    ckpt_df.to_parquet(checkpoint_path, index=False)
+    print(f"[checkpoint] Saved {len(ckpt_df):,} resolved validation prompts -> {checkpoint_path}", flush=True)
 
 
 if __name__ == "__main__":
