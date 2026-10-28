@@ -178,6 +178,42 @@ security department" wording by the summary pre-pass; several others
 looked like inherent multi-source ambiguity or candidates for gold-label
 adaptation rather than anything fixable by re-reading more text. Full-
 article validation was therefore NOT pursued this round.)
+
+2026-10-28b "pass-3 Interest Group reminder" addition: job66666813 (first
+run with the pass-3 canonical examples above) was still net-negative, and
+a row-by-row read of its 6 "broken" rows (pass 2 correct, pass 3 wrongly
+rejected) found something much more specific than the 2026-10-28 fix
+addressed: ALL 6 had gold == 'Interest Group' -- 6 of the 16 rows where
+pass 2 correctly said 'Interest Group' (37.5%), far above any other
+category's rejection rate. Of those 6, 3 share one exact pattern already
+covered by this category's own definition and its 2nd canonical "yes"
+example (a business executive/investor speaking in a "personal capacity"
+about economic/financial/regulatory policy): Karin Keller-Sutter/Sergio
+Ermotti (UBS CEO), Karin Keller-Sutter/Lars Forberg (Cevian Capital
+investor), Beat Jans/Andy Yen (Proton CEO) -- p_true 0.281/0.295/0.499,
+all just under the 0.5 threshold despite being near-verbatim matches to
+the existing canonical example. A 4th (Martin Pfister/pro-Palestinian
+activists, p_true=0.377) is the definition's OTHER explicit inclusion --
+an informal advocacy/protest group acting as a collective -- rejected
+even though the summary described several activists acting together. A
+5th (OSAV-BLV, p_true=0.321) is a media outlet (SRF) criticizing a
+government agency's decision -- already covered by "media outlet... "
+in the definition, but possibly conflated with the decision's own topic
+being a government body. (The 6th, OFEV-BAFU/Benedict Probst, reads as a
+genuine summary-compression/gold-adaptation question rather than a
+definition gap -- left alone, consistent with the 2026-10-28 diagnosis's
+own distinction between reasoning failures and information gaps.)
+
+Pass 2 reads all of these correctly on the first pass; only pass 3,
+holding one specific claimed category in mind while re-reading the
+identical definition text, under-applies these particular clauses more
+than any other category's. Rather than edit CATEGORY_DEFINITION /
+CANONICAL_EXAMPLES (shared with pass 2, which is not broken here), this
+adds a pass-3-ONLY, per-category reminder (VALIDATION_REMINDER, empty for
+every category except 'Interest Group' for now) inserted into
+VALIDATION_QUESTION_TEMPLATE right after the definition -- a targeted,
+auditable patch scoped to the one category and the one pipeline step
+where the evidence actually showed a problem.
 """
 from __future__ import annotations
 
@@ -489,6 +525,32 @@ def build_summary_prompt(row: pd.Series, text_col: str) -> str:
 # compute_validation_calibration / pass-3 loop for how it's used.
 # ---------------------------------------------------------------------------
 
+# Pass-3-ONLY reminder, keyed by claimed_category, empty ("") for any
+# category not listed. See the module docstring's 2026-10-28b changelog
+# entry: these are the specific clauses pass 3 was shown to under-apply
+# even though pass 2 (reading the identical CATEGORY_DEFINITION text)
+# applies them correctly -- evidence-driven, not a general restatement of
+# the definition. Deliberately NOT added to QUESTION_TEMPLATE/_build_prompt
+# (pass 2), which is not broken here.
+VALIDATION_REMINDER = {
+    "Interest Group": (
+        "\nReminder for this category specifically: do NOT reject this just because the "
+        "source is described as speaking \"personally\", informally, or without naming a "
+        "formal organization -- that framing does not by itself rule out Interest Group. "
+        "(1) A business executive, investor, or company representative giving their own "
+        "view on economic, financial, or regulatory policy is still Interest Group -- "
+        "their professional/economic interest is what counts, exactly as in the second "
+        "example above, even when the article frames it as a personal opinion rather than "
+        "an official statement. (2) A group of several named or unnamed activists/"
+        "protesters acting together is still Interest Group (an informal advocacy group), "
+        "even if no formal institution is named -- acting as a collective is what matters, "
+        "not formal registration. (3) A media outlet or journalistic investigation raising "
+        "the criticism also counts, even when the underlying topic is a government body's "
+        "own decision -- what matters is WHO is voicing the criticism, not what it is "
+        "about.\n"
+    ),
+}
+
 VALIDATION_QUESTION_TEMPLATE = """\
 You are a media analysis assistant specialised in Swiss public affairs. In the {context_label} \
 below, "{keyword}" is criticized.
@@ -500,7 +562,7 @@ A prior automated analysis concluded that the source of this criticism belongs t
 following category:
 
 CLAIMED CATEGORY: {category_phrase}
-Definition: {category_definition}
+Definition: {category_definition}{validation_reminder}
 
 Example (answer: True): {yes_example_1}
 Example (answer: True): {yes_example_2}
@@ -541,7 +603,12 @@ def _build_validation_prompt(
     prompts was these examples: pass 2 had them, pass 3 didn't, despite
     both reading identical CATEGORY_DEFINITION text. This is a prompt
     fix, not an information-source fix -- still reads source_summary,
-    not the raw article."""
+    not the raw article.
+
+    2026-10-28b: also inserts VALIDATION_REMINDER[claimed_category] (empty
+    string for any category not in that dict) right after the definition
+    -- see the module docstring's 2026-10-28b entry for the specific,
+    evidence-driven clauses this reinforces for 'Interest Group'."""
     if order not in (1, 2):
         raise ValueError(f"order must be 1 or 2, got {order!r}")
     letter_true, letter_false = letters_for_order(order)
@@ -555,6 +622,7 @@ def _build_validation_prompt(
         context_label=context_label,
         category_phrase=CATEGORY_PHRASE[claimed_category],
         category_definition=CATEGORY_DEFINITION[claimed_category],
+        validation_reminder=VALIDATION_REMINDER.get(claimed_category, ""),
         yes_example_1=CANONICAL_EXAMPLES[claimed_category][0],
         yes_example_2=CANONICAL_EXAMPLES[claimed_category][1],
         no_cat_1=other_cats[0], no_example_1=no_examples[0],

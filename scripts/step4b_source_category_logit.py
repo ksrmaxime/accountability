@@ -115,6 +115,7 @@ import math
 import os
 import sys
 import argparse
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -360,6 +361,65 @@ def main() -> int:
             backend=args.backend,
         )
     )
+
+    # =========================================================================
+    # 2026-10-28 -- diagnostic logging, pas une etape du pipeline.
+    #
+    # Contexte : job66621913 (2026-10-27) et job66666813 (2026-10-28), meme
+    # code, meme GPU physique (UUID identique confirme), meme input, et un
+    # calcul de calibration (p0) dont la forme de batch est fixe (12 prompts,
+    # contenu invariant "N/A"/"the subject") -- ont quand meme produit des p0
+    # differents. Les deux pistes testees et ELIMINEES avec preuve a l'appui :
+    #   - un warning torch "operation non-deterministe, fallback silencieux"
+    #     (absent des .err des deux jobs) ;
+    #   - une calibration relue depuis un vieux checkpoint perime (p0 n'est
+    #     JAMAIS checkpointe sur disque -- toujours recalculee a neuf, cf. le
+    #     bloc [calibration] quelques lignes plus bas).
+    # Il reste deux pistes NI confirmees NI exclues, simplement parce
+    # qu'aucune des deux n'a ete loggee au moment de ces deux runs :
+    #   1. une derive de version torch/transformers (ou du driver CUDA) entre
+    #      les deux jours -- rien ne les pingue dans requirements.txt ;
+    #   2. device_map="auto" placant une couche sur CPU au lieu du GPU selon
+    #      la memoire GPU libre au moment du chargement (pas flagge par
+    #      torch.use_deterministic_algorithms, donc invisible dans les .err).
+    # Ce bloc ne coute rien (pas de job separe, juste quelques lignes au
+    # demarrage de chaque tache) et logge les 3 informations qui manquaient,
+    # pour qu'on puisse trancher si ca se reproduit.
+    # =========================================================================
+    print("=== DIAGNOSTIC ENV (2026-10-28) ===", flush=True)
+    try:
+        smi = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=30)
+        print(smi.stdout, flush=True)
+        if smi.returncode != 0:
+            print(f"[diag] nvidia-smi returncode={smi.returncode} stderr={smi.stderr}", flush=True)
+    except Exception as e:
+        print(f"[diag] nvidia-smi a echoue: {e}", flush=True)
+
+    try:
+        import torch as _torch
+        import transformers as _transformers
+        print(f"[diag] torch={_torch.__version__} | transformers={_transformers.__version__} "
+              f"| torch.version.cuda={_torch.version.cuda}", flush=True)
+    except Exception as e:
+        print(f"[diag] lecture versions torch/transformers a echoue: {e}", flush=True)
+
+    try:
+        device_map = getattr(client.model, "hf_device_map", None)
+        if device_map is not None:
+            non_gpu = {k: v for k, v in device_map.items() if "cuda" not in str(v)}
+            print(f"[diag] device_map: {device_map}", flush=True)
+            if non_gpu:
+                print(f"[diag] ATTENTION: {len(non_gpu)} entree(s) du device_map ne sont PAS sur "
+                      f"un GPU (split CPU/GPU possible, affecte la reproductibilite): {non_gpu}",
+                      flush=True)
+            else:
+                print("[diag] device_map: tout est sur GPU, pas de split CPU/GPU detecte", flush=True)
+        else:
+            print("[diag] client.model n'a pas d'attribut hf_device_map", flush=True)
+    except Exception as e:
+        print(f"[diag] lecture device_map a echoue: {e}", flush=True)
+    print("=== FIN DIAGNOSTIC ENV ===", flush=True)
+    # =========================================================================
 
     # --- Pre-pass: summarize (plain generation). Reuses the same
     # run_llm_dataframe runner as the old generation-based design -- it
