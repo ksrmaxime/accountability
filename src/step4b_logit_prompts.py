@@ -148,6 +148,36 @@ itself, and the handful of errors traced to the summary locking onto a
 different (but real) critic than the one gold used -- those are being
 evaluated for a gold-label adaptation instead, since the logit-probing
 read of the summary was correct in those cases.
+
+2026-10-28 "pass-3 examples" addition: job66621913/66621911 (first run
+after fixing GPU-generation nondeterminism in src/client.py -- see that
+file's own changelog) gave two independently-run, byte-identical outputs,
+finally making this pipeline's numbers trustworthy run-to-run. Under this
+clean signal, pass 2 ALONE reached 69.6% (its best score yet), but pass 3
+made it WORSE (62.3%): 21 rejections, only 6 genuine fixes against 11
+correct answers broken. A row-by-row read of all 23 affected rows'
+source_summary text (the same methodology used for the 2026-10-26
+boundary-sharpening diagnosis) found that in most of them -- both the 11
+broken and a good share of the 12 missed -- the summary ALREADY stated
+everything needed to apply a boundary rule this file had already written
+(e.g. a named foreign head of state -> 'Other'; a named media outlet ->
+'Interest Group'; a CEO speaking "personally" -> 'Interest Group' via its
+business-executive clause; an elected official's "official capacity"
+phrasing -> 'Politician' takes priority per the tie-break rule). Pass 2
+applied these correctly on the first read; pass 3, reading the identical
+definition text a second time, did not. The one structural difference
+between the two prompts: pass 2's QUESTION_TEMPLATE has always included 2
+"yes" + 5 contrastive "no, this is actually category Y" CANONICAL_EXAMPLES
+per category; VALIDATION_QUESTION_TEMPLATE had none. Giving pass 3 the
+SAME examples (see _build_validation_prompt below) is a prompt fix, not an
+information-source fix -- it still reads source_summary, not the raw
+article. (Only one of the 23 rows looked like a genuine information gap
+recoverable from the full article -- fedpol/Mario Fehr, whose elected
+cantonal-executive title was compressed into generic "director of the
+security department" wording by the summary pre-pass; several others
+looked like inherent multi-source ambiguity or candidates for gold-label
+adaptation rather than anything fixable by re-reading more text. Full-
+article validation was therefore NOT pursued this round.)
 """
 from __future__ import annotations
 
@@ -472,6 +502,14 @@ following category:
 CLAIMED CATEGORY: {category_phrase}
 Definition: {category_definition}
 
+Example (answer: True): {yes_example_1}
+Example (answer: True): {yes_example_2}
+Example (answer: False -- the source is actually {no_cat_1} instead): {no_example_1}
+Example (answer: False -- the source is actually {no_cat_2} instead): {no_example_2}
+Example (answer: False -- the source is actually {no_cat_3} instead): {no_example_3}
+Example (answer: False -- the source is actually {no_cat_4} instead): {no_example_4}
+Example (answer: False -- the source is actually {no_cat_5} instead): {no_example_5}
+
 Question: based ONLY on the {context_label} above, is this conclusion correct -- does the \
 criticism of "{keyword}" genuinely come from {category_phrase}?
 Answer with exactly one letter and nothing else:
@@ -486,16 +524,44 @@ def _build_validation_prompt(
 ) -> str:
     """order=1 -> A=True/B=False ; order=2 -> A=False/B=True. Reuses
     LETTERS/letters_for_order verbatim -- same letter-bias cancellation
-    as pass 2, just relabelled True/False instead of Yes/No."""
+    as pass 2, just relabelled True/False instead of Yes/No.
+
+    2026-10-28: now also includes the SAME CANONICAL_EXAMPLES (2 "yes"
+    illustrations of claimed_category + 5 contrastive "no, this is
+    actually {other category}" illustrations) that pass 2's own
+    _build_prompt has always used -- see the module docstring's
+    2026-10-28 changelog entry for why: a row-by-row read of job66621913's
+    pass-3 errors found that in most cases the summary text ALREADY
+    contained everything needed to apply a boundary rule we'd already
+    written (e.g. "Trump is a foreign head of state" -> Other; a named
+    CEO speaking personally -> Interest Group per its business-executive
+    clause), yet pass 3 -- asking the SAME information a second time,
+    holistically -- applied these rules less reliably than pass 2 did on
+    the very first read. The one structural difference between the two
+    prompts was these examples: pass 2 had them, pass 3 didn't, despite
+    both reading identical CATEGORY_DEFINITION text. This is a prompt
+    fix, not an information-source fix -- still reads source_summary,
+    not the raw article."""
     if order not in (1, 2):
         raise ValueError(f"order must be 1 or 2, got {order!r}")
     letter_true, letter_false = letters_for_order(order)
+
+    other_cats = [c for c in CATEGORIES if c != claimed_category]
+    no_examples = [CANONICAL_EXAMPLES[c][0] for c in other_cats]
+
     return VALIDATION_QUESTION_TEMPLATE.format(
         keyword=keyword,
         article_text=article_text,
         context_label=context_label,
         category_phrase=CATEGORY_PHRASE[claimed_category],
         category_definition=CATEGORY_DEFINITION[claimed_category],
+        yes_example_1=CANONICAL_EXAMPLES[claimed_category][0],
+        yes_example_2=CANONICAL_EXAMPLES[claimed_category][1],
+        no_cat_1=other_cats[0], no_example_1=no_examples[0],
+        no_cat_2=other_cats[1], no_example_2=no_examples[1],
+        no_cat_3=other_cats[2], no_example_3=no_examples[2],
+        no_cat_4=other_cats[3], no_example_4=no_examples[3],
+        no_cat_5=other_cats[4], no_example_5=no_examples[4],
         letter_true=letter_true, letter_false=letter_false,
     )
 
