@@ -297,6 +297,13 @@ def main() -> int:
     ap.add_argument("--validation_batch_size", type=int, default=32)
     ap.add_argument("--validation_checkpoint_every", type=int, default=200,
                     help="Save a checkpoint after every N (row,order) validation prompts resolved.")
+    ap.add_argument("--skip_validation", action="store_true",
+                    help="2026-10-29: disable pass 3 entirely -- no validation forward passes are run "
+                    "(saves the GPU time too, not just the output), and source_category stays exactly "
+                    "pass 2's own choice for every row. Added after job66672510's corrected-gold "
+                    "evaluation showed pass 3 net-negative (-1) with no category it reliably improved. "
+                    "Kept as a flag rather than deleting pass 3's code, in case a future fix (summary "
+                    "quality, full-article re-read, etc.) makes it worth re-enabling.")
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -590,115 +597,122 @@ def main() -> int:
     # -- pass 2's own choice is kept, never swapped on a signal that
     # isn't trusted.
     # ---------------------------------------------------------------------
-    validated_idx = [i for i in eligible_idx if pd.notna(df.at[i, "source_category"])]
-    print(f"[validation] Re-checking pass 2's chosen category for {len(validated_idx):,} "
-          f"resolved rows...", flush=True)
+    if args.skip_validation:
+        print("[validation] --skip_validation set -- pass 3 disabled (2026-10-29: "
+              "net-negative on job66672510's corrected-gold eval, see src/step4b_logit_prompts.py "
+              "module docstring). Keeping pass 2's own choice as the final source_category "
+              "for every row, no validation forward passes run.", flush=True)
+        n_val_incomplete = 0
+    else:
+        validated_idx = [i for i in eligible_idx if pd.notna(df.at[i, "source_category"])]
+        print(f"[validation] Re-checking pass 2's chosen category for {len(validated_idx):,} "
+              f"resolved rows...", flush=True)
 
-    print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
-    p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL)
-    for cat in CATEGORIES:
-        print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
+        print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
+        p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL)
+        for cat in CATEGORIES:
+            print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
 
-    val_flat_keys = []    # (row_idx, order)
-    val_flat_prompts = []
-    for row_idx in validated_idx:
-        row = df.loc[row_idx]
-        claimed_category = df.at[row_idx, "source_category"]
-        for order in (1, 2):
-            val_flat_keys.append((row_idx, order))
-            val_flat_prompts.append(
-                build_validation_prompt(row, SUMMARY_TEXT_COL, claimed_category, order, context_label=SUMMARY_CONTEXT_LABEL)
+        val_flat_keys = []    # (row_idx, order)
+        val_flat_prompts = []
+        for row_idx in validated_idx:
+            row = df.loc[row_idx]
+            claimed_category = df.at[row_idx, "source_category"]
+            for order in (1, 2):
+                val_flat_keys.append((row_idx, order))
+                val_flat_prompts.append(
+                    build_validation_prompt(row, SUMMARY_TEXT_COL, claimed_category, order, context_label=SUMMARY_CONTEXT_LABEL)
+                )
+
+        print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
+              f"({len(validated_idx):,} rows x 2 orders)")
+
+        val_done = {}  # (row_idx, order) -> {letter: logit}
+        if Path(validation_checkpoint_path).exists():
+            ckpt = pd.read_parquet(validation_checkpoint_path)
+            for _, r in ckpt.iterrows():
+                vkey = (int(r["row_idx"]), int(r["order"]))
+                val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+            print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
+                  f"{validation_checkpoint_path}", flush=True)
+
+        val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
+        print(f"[validation] {len(val_todo):,} validation prompts remaining "
+              f"({len(val_flat_prompts) - len(val_todo):,} already done)")
+
+        n_since_val_checkpoint = 0
+        for start in range(0, len(val_todo), args.validation_batch_size):
+            batch_flat_idx = val_todo[start:start + args.validation_batch_size]
+            batch_prompts = [val_flat_prompts[i] for i in batch_flat_idx]
+
+            raw = client.logprob_many(
+                system_prompt="",
+                user_prompts=batch_prompts,
+                candidate_letters=candidate_letters,
+                max_input_tokens=args.max_input_tokens,
             )
+            for flat_idx, logits_dict in zip(batch_flat_idx, raw):
+                val_done[val_flat_keys[flat_idx]] = logits_dict
 
-    print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
-          f"({len(validated_idx):,} rows x 2 orders)")
+            n_since_val_checkpoint += len(batch_flat_idx)
+            n_done_total = len(val_flat_prompts) - (len(val_todo) - start - len(batch_flat_idx))
+            print(f"[validation progress] {n_done_total:,}/{len(val_flat_prompts):,} prompts resolved", flush=True)
 
-    val_done = {}  # (row_idx, order) -> {letter: logit}
-    if Path(validation_checkpoint_path).exists():
-        ckpt = pd.read_parquet(validation_checkpoint_path)
-        for _, r in ckpt.iterrows():
-            vkey = (int(r["row_idx"]), int(r["order"]))
-            val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
-        print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
-              f"{validation_checkpoint_path}", flush=True)
+            if n_since_val_checkpoint >= args.validation_checkpoint_every:
+                _save_validation_checkpoint(validation_checkpoint_path, val_done, candidate_letters)
+                n_since_val_checkpoint = 0
 
-    val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
-    print(f"[validation] {len(val_todo):,} validation prompts remaining "
-          f"({len(val_flat_prompts) - len(val_todo):,} already done)")
-
-    n_since_val_checkpoint = 0
-    for start in range(0, len(val_todo), args.validation_batch_size):
-        batch_flat_idx = val_todo[start:start + args.validation_batch_size]
-        batch_prompts = [val_flat_prompts[i] for i in batch_flat_idx]
-
-        raw = client.logprob_many(
-            system_prompt="",
-            user_prompts=batch_prompts,
-            candidate_letters=candidate_letters,
-            max_input_tokens=args.max_input_tokens,
-        )
-        for flat_idx, logits_dict in zip(batch_flat_idx, raw):
-            val_done[val_flat_keys[flat_idx]] = logits_dict
-
-        n_since_val_checkpoint += len(batch_flat_idx)
-        n_done_total = len(val_flat_prompts) - (len(val_todo) - start - len(batch_flat_idx))
-        print(f"[validation progress] {n_done_total:,}/{len(val_flat_prompts):,} prompts resolved", flush=True)
-
-        if n_since_val_checkpoint >= args.validation_checkpoint_every:
+        if val_todo:
             _save_validation_checkpoint(validation_checkpoint_path, val_done, candidate_letters)
-            n_since_val_checkpoint = 0
 
-    if val_todo:
-        _save_validation_checkpoint(validation_checkpoint_path, val_done, candidate_letters)
+        n_rejected = 0
+        n_val_incomplete = 0
+        for row_idx in validated_idx:
+            claimed_category = df.at[row_idx, "source_category"]
+            p_true_by_order = {}
+            val_any_nan = False
+            for order in (1, 2):
+                logits_dict = val_done.get((row_idx, order))
+                if logits_dict is None:
+                    p_true_by_order[order] = float("nan")
+                    val_any_nan = True
+                    continue
+                probs = softmax_restricted(logits_dict)
+                letter_true, _letter_false = letters_for_order(order)
+                p_true_by_order[order] = probs.get(letter_true, float("nan"))
+                if pd.isna(p_true_by_order[order]):
+                    val_any_nan = True
 
-    n_rejected = 0
-    n_val_incomplete = 0
-    for row_idx in validated_idx:
-        claimed_category = df.at[row_idx, "source_category"]
-        p_true_by_order = {}
-        val_any_nan = False
-        for order in (1, 2):
-            logits_dict = val_done.get((row_idx, order))
-            if logits_dict is None:
-                p_true_by_order[order] = float("nan")
+            p_true = average_yes_over_orderings(p_true_by_order[1], p_true_by_order[2])
+            if pd.isna(p_true) or pd.isna(p0_val.get(claimed_category)):
                 val_any_nan = True
+
+            if val_any_nan:
+                # Inconclusive read -- fail safe: keep pass 2's own choice,
+                # don't swap on a signal we don't trust.
+                n_val_incomplete += 1
+                df.at[row_idx, "source_category_incomplete"] = "TRUE"
                 continue
-            probs = softmax_restricted(logits_dict)
-            letter_true, _letter_false = letters_for_order(order)
-            p_true_by_order[order] = probs.get(letter_true, float("nan"))
-            if pd.isna(p_true_by_order[order]):
-                val_any_nan = True
 
-        p_true = average_yes_over_orderings(p_true_by_order[1], p_true_by_order[2])
-        if pd.isna(p_true) or pd.isna(p0_val.get(claimed_category)):
-            val_any_nan = True
+            p_true_corrected = calibrate(p_true, p0_val[claimed_category])
+            df.at[row_idx, "source_category_validation_p_true"] = p_true_corrected
 
-        if val_any_nan:
-            # Inconclusive read -- fail safe: keep pass 2's own choice,
-            # don't swap on a signal we don't trust.
-            n_val_incomplete += 1
-            df.at[row_idx, "source_category_incomplete"] = "TRUE"
-            continue
+            if p_true_corrected >= 0.5:
+                df.at[row_idx, "source_category_validated"] = "TRUE"
+            else:
+                df.at[row_idx, "source_category_validated"] = "FALSE"
+                runner_up = df.at[row_idx, "source_category_runnerup"]
+                if pd.notna(runner_up):
+                    df.at[row_idx, "source_category"] = runner_up
+                    n_rejected += 1
+                # else: no runner-up available (shouldn't normally happen with
+                # 6 categories) -- keep pass 2's own choice rather than leave
+                # the row with no answer at all.
 
-        p_true_corrected = calibrate(p_true, p0_val[claimed_category])
-        df.at[row_idx, "source_category_validation_p_true"] = p_true_corrected
-
-        if p_true_corrected >= 0.5:
-            df.at[row_idx, "source_category_validated"] = "TRUE"
-        else:
-            df.at[row_idx, "source_category_validated"] = "FALSE"
-            runner_up = df.at[row_idx, "source_category_runnerup"]
-            if pd.notna(runner_up):
-                df.at[row_idx, "source_category"] = runner_up
-                n_rejected += 1
-            # else: no runner-up available (shouldn't normally happen with
-            # 6 categories) -- keep pass 2's own choice rather than leave
-            # the row with no answer at all.
-
-    print(f"[validation] {n_rejected:,}/{len(validated_idx):,} rows rejected by pass 3 and "
-          f"swapped to pass 2's runner-up category "
-          f"({n_val_incomplete:,} validation reads inconclusive, pass 2's choice kept as-is)",
-          flush=True)
+        print(f"[validation] {n_rejected:,}/{len(validated_idx):,} rows rejected by pass 3 and "
+              f"swapped to pass 2's runner-up category "
+              f"({n_val_incomplete:,} validation reads inconclusive, pass 2's choice kept as-is)",
+              flush=True)
 
     n_incomplete = int((df["source_category_incomplete"] == "TRUE").sum())
     if n_incomplete > n_incomplete_pass2:

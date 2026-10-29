@@ -95,8 +95,22 @@ CHECKPOINT_EVERY=200
 # (pas de temperature/max_new_tokens), reutilise CANDIDATE_LETTERS et
 # MAX_INPUT_TOKENS ci-dessus. batch_size compte des prompts (row x ordre),
 # 2 par ligne validee -- bien moins que la passe 2 (qui en compte 12/ligne).
+#
+# 2026-10-29 -- DESACTIVEE pour le moment (SKIP_VALIDATION=1). Sur
+# job66672510 evalue contre le gold corrige (4 lignes mal etiquetees
+# trouvees et corrigees le meme jour), la passe 3 reste net-negative
+# (-1 : 0 corrigee, 1 cassee, 1 neutre) sans qu'aucune categorie n'en
+# beneficie de facon fiable -- voir le changelog de
+# src/step4b_logit_prompts.py et scripts/step4b_source_category_logit.py
+# pour le detail de l'investigation (biais "Interest Group" corrige
+# le 28/10, puis constat que les erreurs restantes sont des trous
+# d'info au resume, pas des erreurs de raisonnement pass2/3). Remettre
+# SKIP_VALIDATION=0 ci-dessous pour la reactiver sans rien supprimer :
+# le flag --skip_validation est ajoute conditionnellement juste avant
+# l'appel python, pas en dur.
 VALIDATION_BATCH_SIZE=32
 VALIDATION_CHECKPOINT_EVERY=200
+SKIP_VALIDATION=${SKIP_VALIDATION:-1}
 
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array
 
@@ -132,7 +146,12 @@ echo "TEXT_COL=${TEXT_COL} | NUM_TASKS=${NUM_TASKS} | TASK=${SLURM_ARRAY_TASK_ID
 echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "SUMMARY_BATCH_SIZE=${SUMMARY_BATCH_SIZE} | SUMMARY_TEMPERATURE=${SUMMARY_TEMPERATURE} | SUMMARY_MAX_NEW_TOKENS=${SUMMARY_MAX_NEW_TOKENS} | SUMMARY_CHECKPOINT_EVERY=${SUMMARY_CHECKPOINT_EVERY}"
 echo "BATCH_SIZE=${BATCH_SIZE} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | CANDIDATE_LETTERS=${CANDIDATE_LETTERS}"
-echo "VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY}"
+echo "VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION}"
+
+SKIP_VALIDATION_FLAG=()
+if [[ "${SKIP_VALIDATION}" == "1" ]]; then
+    SKIP_VALIDATION_FLAG=(--skip_validation)
+fi
 
 python scripts/step4b_source_category_logit.py \
   --input                    "$INPUT" \
@@ -153,7 +172,8 @@ python scripts/step4b_source_category_logit.py \
   --checkpoint_every          "$CHECKPOINT_EVERY" \
   --validation_batch_size     "$VALIDATION_BATCH_SIZE" \
   --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
-  --num_tasks                 "$NUM_TASKS"
+  --num_tasks                 "$NUM_TASKS" \
+  "${SKIP_VALIDATION_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 
 echo "Task ${SLURM_ARRAY_TASK_ID} terminee."
