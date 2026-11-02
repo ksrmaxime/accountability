@@ -39,9 +39,37 @@ written straight to the final column below, with no second LLM call:
     and the --verify_* CLI args below are kept, unused, in case pass 2 is
     revisited later.
 
-Output columns: keyword_answer          -> "YES" | "NO" | NA   (final = pass-1 draft, or forced)
-                keyword_answer_draft    -> "YES" | "NO" | NA   (pass 1)
-                keyword_justification   -> free text | NA      (pass 1)
+2026-11-02 "validate-on-full-article" addition: a deep manual read of
+job66790113's 148 step3 errors (gold corrected) found a heavily FP-skewed
+pattern -- 109 false positives against 39 false negatives, concentrated on
+named Federal Councillors, with every read FP justification showing the
+same root cause (pass 1 treats any negative-valence mention near the named
+entity as criticism of it personally, even when fault belongs elsewhere).
+Rather than another round of pass-1 prompt tuning (a dozen rounds already
+tried and reverted/net-negative, see src/step3_prompts.py), this adds a
+NEW, separate validation pass -- see src/step3_logit_prompts.py's module
+docstring for the full design rationale. It is deliberately NOT the old
+removed pass 2: it re-reads the FULL ARTICLE (genuinely new information,
+not pass 1's own justification text), it is scoped ONLY to rows pass 1
+said YES to (can only ever flip YES->NO, never create a new false
+negative), and it uses step4b's proven logit-probing mechanism (one
+forward pass, order-swap, context-free calibration) instead of generation.
+Forced rows (keyword_answer_forced == "TRUE") skip this pass entirely,
+same convention as the old pass 2. Toggle with --skip_validation (see
+sbatch_step3_array.sh's SKIP_VALIDATION).
+
+Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
+                                                       flipped to NO by the validation pass)
+                keyword_answer_draft              -> "YES" | "NO" | NA   (pass 1)
+                keyword_justification             -> free text | NA      (pass 1)
+                keyword_answer_before_validation  -> "YES" | NA  (pass 1's own verdict, before
+                                                       the validation pass touched it -- only
+                                                       set for rows the validation pass actually
+                                                       looked at)
+                keyword_answer_validation_p_true  -> calibrated P(pass 1's YES is correct), or NA
+                keyword_answer_validated          -> "TRUE" | "FALSE" | NA (NA = not eligible for
+                                                       validation, or an inconclusive read --
+                                                       fail-safe: pass 1's YES is kept either way)
 
 Usage
 -----
@@ -75,6 +103,10 @@ from src.step3_prompts import (
 )
 from src.step3_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
+from src.step3_logit_prompts import (
+    build_validation_prompt, build_validation_calibration_prompt, letters_for_order,
+)
+from src.step4b_logit_utils import softmax_restricted, average_yes_over_orderings, calibrate
 
 DRAFT_COLS = ["keyword_answer_draft", "keyword_justification"]
 FINAL_COLS = ["keyword_answer"]
@@ -82,7 +114,14 @@ FINAL_COLS = ["keyword_answer"]
 # forced one-word pass rather than a genuine two-pass verification -- see
 # the retry/force block in main(). NA for every normally-answered row.
 FLAG_COLS = ["keyword_answer_forced"]
-ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS
+# 2026-11-02 "validate-on-full-article" pass -- see src/step3_logit_prompts.py
+# and this file's own module docstring.
+VALIDATION_COLS = [
+    "keyword_answer_before_validation",
+    "keyword_answer_validation_p_true",
+    "keyword_answer_validated",
+]
+ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS + VALIDATION_COLS
 
 VERIFY_LABELS = {"YES": "YES", "NO": "NO"}
 
@@ -140,6 +179,27 @@ def main() -> int:
     ap.add_argument("--verify_max_new_tokens",   type=int,   default=8)
     ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
 
+    # --- Validation pass (2026-11-02 "validate-on-full-article", logit-
+    # probing): no temperature/max_new_tokens -- a single forward pass
+    # reads next-token logits, nothing is sampled. batch_size counts
+    # individual (row, order) PROMPTS, not rows -- each validated row
+    # produces 2 prompts (order-swap). Reuses --max_input_tokens from
+    # pass 1 above (same article text, same truncation budget needed). ---
+    ap.add_argument("--candidate_letters", default="A,B",
+                    help="Comma-separated single-token candidates for Yes/No in the validation "
+                         "pass. Verify these with scripts/check_step4b_logit_tokens.py before "
+                         "relying on them (same tokenizer, same letters already checked for "
+                         "step4b).")
+    ap.add_argument("--validation_batch_size", type=int, default=32)
+    ap.add_argument("--validation_checkpoint_every", type=int, default=200,
+                    help="Save a checkpoint after every N (row,order) validation prompts resolved.")
+    ap.add_argument("--skip_validation", action="store_true",
+                    help="2026-11-02: disable the validation pass entirely -- no validation "
+                    "forward passes are run, and keyword_answer stays exactly pass 1's own "
+                    "(possibly forced) answer for every row. Kept as a flag from day one, "
+                    "having learned from step4b's pass 3 that a validation pass needs to be "
+                    "easy to turn off without touching code if it measures net-negative.")
+
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
     ap.add_argument("--task_id",   type=int, default=None,
@@ -148,6 +208,9 @@ def main() -> int:
                     help="Total number of array tasks. If omitted, read from SLURM_ARRAY_TASK_COUNT.")
 
     args = ap.parse_args()
+    candidate_letters = [s.strip() for s in args.candidate_letters.split(",") if s.strip()]
+    if len(candidate_letters) != 2:
+        raise ValueError(f"--candidate_letters must give exactly 2 letters, got {candidate_letters!r}")
 
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
@@ -351,6 +414,166 @@ def main() -> int:
         working["keyword_answer"].notna(), working["keyword_answer_draft"]
     )
 
+    # -------------------------------------------------------------------
+    # Validation pass (2026-11-02 "validate-on-full-article", logit-
+    # probing): see this file's own module docstring and
+    # src/step3_logit_prompts.py for the full design rationale. Scoped
+    # ONLY to rows pass 1 said YES to, excluding forced rows (same
+    # convention as the old, removed pass 2 -- a forced row never went
+    # through pass 2 either, there is nothing left to try to extract from
+    # this model on it). Re-reads the RAW ARTICLE (args.text_col), never
+    # pass 1's own justification.
+    # -------------------------------------------------------------------
+    if args.skip_validation:
+        print("[validation] --skip_validation set -- validation pass disabled. Keeping pass "
+              "1's own (possibly forced) keyword_answer for every row, no validation forward "
+              "passes run.", flush=True)
+        n_val_rejected = 0
+        n_val_incomplete = 0
+        n_val_candidates = 0
+    else:
+        not_forced = working["keyword_answer_forced"] != "TRUE"
+        validated_idx = working.index[
+            build_mask(working, text_col=args.text_col)
+            & (working["keyword_answer"] == "YES")
+            & not_forced
+        ].tolist()
+        n_val_candidates = len(validated_idx)
+        print(f"[validation] Re-checking pass 1's YES verdict for {n_val_candidates:,} rows "
+              f"against the full article...", flush=True)
+
+        if task_id is not None:
+            validation_checkpoint_path = args.output_base + f"_task{task_id}_step3val_checkpoint.parquet"
+        else:
+            validation_checkpoint_path = args.output_base + "_step3val_checkpoint.parquet"
+
+        print("[validation] Computing p0 (this question's own intrinsic yes-bias) on the "
+              "empty-article variant...", flush=True)
+        calib_prompts = [build_validation_calibration_prompt(order) for order in (1, 2)]
+        calib_raw = client.logprob_many(
+            system_prompt="",
+            user_prompts=calib_prompts,
+            candidate_letters=candidate_letters,
+            max_input_tokens=args.max_input_tokens,
+        )
+        p_yes_by_order = {}
+        for order, logits_dict in zip((1, 2), calib_raw):
+            probs = softmax_restricted(logits_dict)
+            letter_yes, _letter_no = letters_for_order(order)
+            p_yes_by_order[order] = probs.get(letter_yes, float("nan"))
+        p0 = average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
+        print(f"  p0 = {p0:.4f}", flush=True)
+
+        val_flat_keys = []    # (row_idx, order)
+        val_flat_prompts = []
+        for row_idx in validated_idx:
+            row = working.loc[row_idx]
+            for order in (1, 2):
+                val_flat_keys.append((row_idx, order))
+                val_flat_prompts.append(build_validation_prompt(row, args.text_col, order))
+
+        print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
+              f"({n_val_candidates:,} rows x 2 orders)", flush=True)
+
+        val_done = {}  # (row_idx, order) -> {letter: logit}
+        if Path(validation_checkpoint_path).exists():
+            ckpt = pd.read_parquet(validation_checkpoint_path)
+            for _, r in ckpt.iterrows():
+                vkey = (int(r["row_idx"]), int(r["order"]))
+                val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+            print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
+                  f"{validation_checkpoint_path}", flush=True)
+
+        val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
+        print(f"[validation] {len(val_todo):,} validation prompts remaining "
+              f"({len(val_flat_prompts) - len(val_todo):,} already done)", flush=True)
+
+        def _save_val_checkpoint():
+            rows = []
+            for (row_idx, order), logits_dict in val_done.items():
+                r = {"row_idx": row_idx, "order": order}
+                for letter in candidate_letters:
+                    r[f"logit_{letter}"] = logits_dict.get(letter, float("nan"))
+                rows.append(r)
+            ckpt_df = pd.DataFrame(rows)
+            Path(validation_checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            ckpt_df.to_parquet(validation_checkpoint_path, index=False)
+            print(f"[checkpoint] Saved {len(ckpt_df):,} resolved validation prompts -> "
+                  f"{validation_checkpoint_path}", flush=True)
+
+        n_since_val_checkpoint = 0
+        for start in range(0, len(val_todo), args.validation_batch_size):
+            batch_flat_idx = val_todo[start:start + args.validation_batch_size]
+            batch_prompts = [val_flat_prompts[i] for i in batch_flat_idx]
+
+            raw = client.logprob_many(
+                system_prompt="",
+                user_prompts=batch_prompts,
+                candidate_letters=candidate_letters,
+                max_input_tokens=args.max_input_tokens,
+            )
+            for flat_idx, logits_dict in zip(batch_flat_idx, raw):
+                val_done[val_flat_keys[flat_idx]] = logits_dict
+
+            n_since_val_checkpoint += len(batch_flat_idx)
+            n_done_total = len(val_flat_prompts) - (len(val_todo) - start - len(batch_flat_idx))
+            print(f"[validation progress] {n_done_total:,}/{len(val_flat_prompts):,} prompts "
+                  f"resolved", flush=True)
+
+            if n_since_val_checkpoint >= args.validation_checkpoint_every:
+                _save_val_checkpoint()
+                n_since_val_checkpoint = 0
+
+        if val_todo:
+            _save_val_checkpoint()
+
+        n_val_rejected = 0
+        n_val_incomplete = 0
+        for row_idx in validated_idx:
+            working.at[row_idx, "keyword_answer_before_validation"] = "YES"
+
+            p_yes_by_order = {}
+            val_any_nan = False
+            for order in (1, 2):
+                logits_dict = val_done.get((row_idx, order))
+                if logits_dict is None:
+                    p_yes_by_order[order] = float("nan")
+                    val_any_nan = True
+                    continue
+                probs = softmax_restricted(logits_dict)
+                letter_yes, _letter_no = letters_for_order(order)
+                p_yes_by_order[order] = probs.get(letter_yes, float("nan"))
+                if pd.isna(p_yes_by_order[order]):
+                    val_any_nan = True
+
+            p_yes = average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
+            if pd.isna(p_yes) or pd.isna(p0):
+                val_any_nan = True
+
+            if val_any_nan:
+                # Inconclusive read -- fail-safe: keep pass 1's own YES,
+                # don't swap on a signal we don't trust.
+                n_val_incomplete += 1
+                continue
+
+            p_yes_corrected = calibrate(p_yes, p0)
+            working.at[row_idx, "keyword_answer_validation_p_true"] = p_yes_corrected
+
+            if p_yes_corrected >= 0.5:
+                working.at[row_idx, "keyword_answer_validated"] = "TRUE"
+            else:
+                working.at[row_idx, "keyword_answer_validated"] = "FALSE"
+                working.at[row_idx, "keyword_answer"] = "NO"
+                n_val_rejected += 1
+
+        print(f"[validation] {n_val_rejected:,}/{n_val_candidates:,} rows rejected (flipped "
+              f"YES->NO) ({n_val_incomplete:,} validation reads inconclusive, pass 1's YES "
+              f"kept as-is for those)", flush=True)
+
+        if Path(validation_checkpoint_path).exists():
+            Path(validation_checkpoint_path).unlink()
+            print(f"[checkpoint] Deleted {validation_checkpoint_path}")
+
     # --- Save ---
     job_id = (
         os.environ.get("SLURM_ARRAY_JOB_ID")
@@ -382,7 +605,9 @@ def main() -> int:
         f"(keyword_answer: {yes_count:,} YES / {no_count:,} NO / {na_count:,} NA | "
         f"keyword_justification: {just_count:,} filled | "
         f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
-        f"forced (no real verification): {forced:,})"
+        f"forced (no real verification): {forced:,} | "
+        f"validation: {n_val_rejected:,}/{n_val_candidates:,} rejected, "
+        f"{n_val_incomplete:,} inconclusive)"
     )
 
     if Path(checkpoint_path).exists():

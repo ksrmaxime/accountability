@@ -69,6 +69,23 @@ VERIFY_TEMPERATURE=0.0
 DRAFT_MAX_RETRIES=2
 RETRY_TEMPERATURE=0.4
 
+# Validation pass (2026-11-02 "validate-on-full-article", logit-probing) --
+# re-reads the FULL ARTICLE for every row pass 1 said YES to (never NO),
+# same calibrated-logit machinery as step4b's own validation pass (one
+# forward pass, order-swap, context-free calibration), and can only ever
+# flip YES->NO. Added after a deep manual read of job66790113's 148 step3
+# errors found a heavily FP-skewed pattern (109 FP vs 39 FN) concentrated
+# on named Federal Councillors, all tracing to the same root cause -- see
+# src/step3_logit_prompts.py's module docstring for the full diagnosis and
+# why this is NOT a repeat of the generation-based pass 2 removed on
+# 2026-10-13. CANDIDATE_LETTERS reuses the pair already checked for
+# step4b's tokenizer (scripts/check_step4b_logit_tokens.py) -- same model,
+# same tokenizer, no need to re-check.
+CANDIDATE_LETTERS=A,B
+VALIDATION_BATCH_SIZE=32
+VALIDATION_CHECKPOINT_EVERY=200
+SKIP_VALIDATION=${SKIP_VALIDATION:-0}   # 0 = validation pass runs (first test of this new mechanism); set SKIP_VALIDATION=1 to disable without touching code if it measures net-negative like step4b's pass 3 did.
+
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step3_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
 # =============================================================================
@@ -104,6 +121,12 @@ echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
+echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION}"
+
+SKIP_VALIDATION_FLAG=()
+if [[ "${SKIP_VALIDATION}" == "1" ]]; then
+    SKIP_VALIDATION_FLAG=(--skip_validation)
+fi
 
 python scripts/step3_criticism_detection.py \
   --input             "$INPUT" \
@@ -124,7 +147,11 @@ python scripts/step3_criticism_detection.py \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
   --draft_max_retries       "$DRAFT_MAX_RETRIES" \
   --retry_temperature       "$RETRY_TEMPERATURE" \
-  --num_tasks         "$NUM_TASKS"
+  --candidate_letters       "$CANDIDATE_LETTERS" \
+  --validation_batch_size   "$VALIDATION_BATCH_SIZE" \
+  --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
+  --num_tasks         "$NUM_TASKS" \
+  "${SKIP_VALIDATION_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 
 echo "Task ${SLURM_ARRAY_TASK_ID} terminee."
