@@ -144,5 +144,13 @@ echo "Merge termine."
 echo "${RUN_DIR}" > "${WORKDIR}/data/output/.last_step4a_archive"
 
 # -- Auto-chain -----------------------------------------------------------------
-sbatch "${WORKDIR}/sbatch_step4b_array.sh" "${MERGED_PARQUET}"
-echo "[chain] -> sbatch_step4b_array.sh submitted (input: ${MERGED_PARQUET})"
+# 2026-11-02 -- CORRIGE : pointait encore vers l'ancien sbatch_step4b_array.sh
+# (design 3-pass a generation de texte), jamais mis a jour quand le design
+# logit-probing (sbatch_step4b_logit_array.sh) a ete introduit le 2026-10-26.
+# Consequence concrete : job66697361 (lance depuis step3 via l'auto-chain,
+# le 2026-11-01/02) a tourne sur l'ancien step4b 3-pass a son insu -- voir
+# step4b_merged_job66697262/sbatch_array_used.sh qui le confirme. Desormais
+# l'auto-chain pointe vers le design logit (avec --skip_validation=1 par
+# defaut depuis le 2026-10-29, cf. sbatch_step4b_logit_array.sh).
+sbatch "${WORKDIR}/sbatch_step4b_logit_array.sh" "${MERGED_PARQUET}"
+echo "[chain] -> sbatch_step4b_logit_array.sh submitted (input: ${MERGED_PARQUET})"
