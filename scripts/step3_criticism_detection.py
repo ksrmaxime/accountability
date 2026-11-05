@@ -263,14 +263,22 @@ def main() -> int:
             Path(checkpoint_path).unlink()
             working = df.copy()
             for col in ALL_COLS:
-                working[col] = pd.Series(pd.NA, index=working.index, dtype="string")
+                # 2026-11-05: keyword_answer_validation_p_true holds a FLOAT
+                # (the calibrated P(yes)), not a label -- pandas' strict
+                # "string" dtype raises TypeError on a float assignment
+                # (caught in testing before this ever reached production;
+                # see the validation-pass block below). Every other column
+                # here is a label/flag and keeps the original "string" dtype.
+                dtype = "object" if col == "keyword_answer_validation_p_true" else "string"
+                working[col] = pd.Series(pd.NA, index=working.index, dtype=dtype)
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             working = ckpt
     else:
         working = df.copy()
         for col in ALL_COLS:
-            working[col] = pd.Series(pd.NA, index=working.index, dtype="string")
+            dtype = "object" if col == "keyword_answer_validation_p_true" else "string"
+            working[col] = pd.Series(pd.NA, index=working.index, dtype=dtype)
 
     # --- LLM client ---
     client = TransformersClient(
@@ -432,7 +440,21 @@ def main() -> int:
         n_val_incomplete = 0
         n_val_candidates = 0
     else:
-        not_forced = working["keyword_answer_forced"] != "TRUE"
+        # 2026-11-05 bug fix: keyword_answer_forced is pandas "string" dtype
+        # (nullable/pyarrow-backed), and for the (overwhelming majority of)
+        # rows that were NEVER forced it holds NA, not "FALSE". `!= "TRUE"`
+        # on a pyarrow-backed string column propagates NA->NA rather than
+        # NA->True, and indexing a DataFrame with a boolean mask containing
+        # NA silently treats NA as False (observed directly: no exception,
+        # just an empty validated_idx) -- so on job66796444/job66813431
+        # this excluded EVERY non-forced row, and the validation pass ran
+        # with 0 candidates on every task, completely silently (no crash,
+        # no visible symptom beyond keyword_answer_before_validation being
+        # NA for every single row, caught only by auditing that column
+        # after the fact). .fillna(True) makes "no forced flag recorded"
+        # correctly mean "not forced", matching every other NA check this
+        # script already does (e.g. keyword_answer_draft.isna()).
+        not_forced = (working["keyword_answer_forced"] != "TRUE").fillna(True)
         validated_idx = working.index[
             build_mask(working, text_col=args.text_col)
             & (working["keyword_answer"] == "YES")
