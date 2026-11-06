@@ -68,6 +68,58 @@ already-tuned definition and all 9 existing worked examples, just
 reformatted for a single calibrated-logit question with order-swap letters
 instead of free-text generation with a justification. Nothing here edits
 src/step3_prompts.py.
+
+2026-11-06 "validate-on-justification" ablation: job20002898 (the
+"article" mode above, --validation_input=article) measured clearly net-
+negative against the corrected gold -- 218/236 scored candidates rejected
+(0 kept), of which only 96 were genuine FPs correctly caught but 122 were
+genuine TPs wrongly turned into new FNs (step3 accuracy 77.9%, BELOW the
+78.7% naive-NO baseline; micro-accuracy over the full cascade fell from
+68.8% to 44.2%). The job's own printed p0 (0.3932) ruled out a degenerate
+calibration baseline as the cause -- the raw (pre-calibration) P(yes) read
+off the REAL article was itself crushed to ~0.17 on average even for true
+positives, while the content-free "N/A" calibration article alone scored
+HIGHER (p0=0.39) than almost every real read. A weak-but-real directional
+signal survived (mean p_true 0.0755 for true-YES vs 0.0570 for true-NO),
+so the model is not reading randomly, just far too conservatively on real
+articles. Leading hypothesis: a real, long, multi-paragraph Swiss news
+article typically mentions the keyword entity in several neutral/
+distractor contexts (quotes, policy statements, routine mentions) in
+addition to the one passage that actually criticizes it, whereas the 10
+worked examples are all short, single-passage, clean scenarios -- forcing
+the model to locate the one relevant passage itself, from scratch, inside
+a noisy real article is a much harder retrieval problem than judging a
+short clean scenario, and the model appears to default toward the
+"neutral mention" (NO) pattern when it can't confidently relocate the
+criticism.
+
+This ablation tests the fix suggested by that diagnosis directly: give the
+validation pass pass 1's own JUSTIFICATION instead of the raw article --
+pass 1 has already done the retrieval work of locating and stating the
+specific claimed criticism in one or two clean sentences, so the
+validation question becomes "does this stated reasoning actually hold up
+under the definition", not "can you re-find the needle in the haystack".
+This is NOT simply reverting to the pre-2026-10-13 removed pass 2:
+  - That pass 2 ran on ALL rows (both YES and NO) and used free-text
+    generation with no calibration; this ablation keeps the YES-only scope
+    (can only ever flip YES->NO, by construction) and the full logit-
+    probing/order-swap/context-free-calibration machinery.
+  - The question itself is reframed as an explicit VALIDATION REQUEST
+    ("does this justification validate the claim") rather than a
+    confirm/reject-a-prior-conclusion framing, to avoid any residual
+    anchoring-on-an-external-claim effect.
+  - The acknowledged risk carried over from that old pass 2's own history
+    still applies and is not eliminated by this change: reading only pass
+    1's own justification means this pass can only ever judge pass 1's
+    OWN framing of the evidence, not independently re-derive it from the
+    source -- if pass 1's justification itself already launders a target-
+    attribution mistake into confident-sounding prose, this pass cannot
+    catch that specific failure mode. It can still catch cases where the
+    justification, read coldly against the strict definition, doesn't
+    actually support a YES (e.g. restates a neutral mention or someone
+    else's fault) even though pass 1 labeled it YES.
+Toggle via --validation_input article|justification (default: article,
+unchanged) -- see scripts/step3_criticism_detection.py.
 """
 from __future__ import annotations
 import pandas as pd
@@ -147,6 +199,37 @@ Answer with exactly one letter and nothing else:
 CALIBRATION_KEYWORD = "the subject"
 CALIBRATION_ARTICLE = "N/A"
 
+# 2026-11-06 "validate-on-justification" ablation (see module docstring).
+# Reads only pass 1's own keyword_justification, reframed as an explicit
+# validation request rather than a confirm/reject-a-prior-conclusion
+# question, to test whether a shorter, already-focused input avoids the
+# near-universal over-rejection measured in --validation_input=article
+# mode (job20002898).
+VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION = """\
+You are a media analysis assistant specialised in Swiss public affairs. Below is the \
+justification an automated analysis wrote to support its claim that "{keyword}" is criticized \
+in a news article. Your task is to validate whether this justification actually holds up.
+
+{definition}
+
+JUSTIFICATION TO VALIDATE:
+{justification_text}
+
+{examples_block}
+
+Question: does the justification above genuinely establish, under the definition given, that \
+"{keyword}" is itself being criticized -- for who it is or what it did or decided? Validate it \
+ONLY if the reasoning given actually shows direct fault, blame, failure, or wrongdoing \
+attributed to "{keyword}" itself -- not a difficult situation it merely faces, a neutral \
+mention, its own statement or decision, or criticism that in fact targets someone or something \
+else.
+Answer with exactly one letter and nothing else:
+{letter_yes} = YES, this justification is validated
+{letter_no} = NO, this justification is not validated\
+"""
+
+CALIBRATION_JUSTIFICATION = "N/A"
+
 
 def _examples_block() -> str:
     lines = []
@@ -197,3 +280,34 @@ def build_validation_calibration_prompt(order: int) -> str:
     measures, once per task (not per row), how often this validation
     question's wording defaults to YES independent of any real content."""
     return _build_prompt(CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order)
+
+
+def _build_prompt_from_justification(keyword: str, justification_text: str, order: int) -> str:
+    letter_yes, letter_no = letters_for_order(order)
+    return VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION.format(
+        keyword=keyword,
+        definition=VALIDATION_DEFINITION,
+        justification_text=justification_text,
+        examples_block=_EXAMPLES_BLOCK,
+        letter_yes=letter_yes,
+        letter_no=letter_no,
+    )
+
+
+def build_validation_prompt_from_justification(row: pd.Series, order: int) -> str:
+    """2026-11-06 ablation: same validation question, but grounded in pass
+    1's own keyword_justification instead of the raw article -- see this
+    file's module docstring for why. `row` must already have a non-null
+    keyword_justification (callers should filter for that, same as they
+    already filter for keyword_answer == "YES" and not-forced)."""
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    justification = "" if pd.isna(row.get("keyword_justification")) else str(row["keyword_justification"]).strip()
+    return _build_prompt_from_justification(keyword, justification, order)
+
+
+def build_validation_calibration_prompt_from_justification(order: int) -> str:
+    """Context-free calibration for the justification-input variant --
+    same idea as build_validation_calibration_prompt, but using the
+    neutral justification-shaped placeholder instead of an empty article."""
+    return _build_prompt_from_justification(CALIBRATION_KEYWORD, CALIBRATION_JUSTIFICATION, order)

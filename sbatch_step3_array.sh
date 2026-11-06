@@ -86,6 +86,23 @@ VALIDATION_BATCH_SIZE=32
 VALIDATION_CHECKPOINT_EVERY=200
 SKIP_VALIDATION=${SKIP_VALIDATION:-0}   # 0 = validation pass runs (first test of this new mechanism); set SKIP_VALIDATION=1 to disable without touching code if it measures net-negative like step4b's pass 3 did.
 
+# 2026-11-06: job20002898 (VALIDATION_INPUT=article, the original design)
+# measured net-negative against gold -- 218/236 candidates rejected, 0
+# kept; of those, only 96 were genuine FPs correctly caught but 122 were
+# genuine TPs wrongly flipped to new FNs (step3 accuracy fell BELOW the
+# naive-NO baseline). job66882906's own printed p0 (0.3932) ruled out a
+# degenerate calibration baseline -- the raw P(yes) read off the real
+# article was itself crushed to ~0.17 even for true positives, while the
+# content-free calibration article alone scored HIGHER. See
+# src/step3_logit_prompts.py's module docstring for the full diagnosis.
+# VALIDATION_INPUT=justification is the resulting ablation: re-checks
+# pass 1's own justification text (already-focused, no real-article
+# noise to re-locate) instead of the raw article, with the question
+# reframed as an explicit validation request. Default kept at "article"
+# (unchanged) so nothing changes silently -- set VALIDATION_INPUT=justification
+# to run this test.
+VALIDATION_INPUT=${VALIDATION_INPUT:-article}
+
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step3_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
 # =============================================================================
@@ -121,7 +138,7 @@ echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
-echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION}"
+echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT}"
 
 SKIP_VALIDATION_FLAG=()
 if [[ "${SKIP_VALIDATION}" == "1" ]]; then
@@ -150,6 +167,7 @@ python scripts/step3_criticism_detection.py \
   --candidate_letters       "$CANDIDATE_LETTERS" \
   --validation_batch_size   "$VALIDATION_BATCH_SIZE" \
   --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
+  --validation_input        "$VALIDATION_INPUT" \
   --num_tasks         "$NUM_TASKS" \
   "${SKIP_VALIDATION_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID

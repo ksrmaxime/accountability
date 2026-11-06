@@ -58,6 +58,11 @@ Forced rows (keyword_answer_forced == "TRUE") skip this pass entirely,
 same convention as the old pass 2. Toggle with --skip_validation (see
 sbatch_step3_array.sh's SKIP_VALIDATION).
 
+2026-11-06: added --validation_input (article|justification, default
+article) after the article-mode pass measured net-negative on job20002898
+-- see src/step3_logit_prompts.py's module docstring for the full
+diagnosis and the justification-mode ablation it motivated.
+
 Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
                                                        flipped to NO by the validation pass)
                 keyword_answer_draft              -> "YES" | "NO" | NA   (pass 1)
@@ -104,7 +109,9 @@ from src.step3_prompts import (
 from src.step3_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
 from src.step3_logit_prompts import (
-    build_validation_prompt, build_validation_calibration_prompt, letters_for_order,
+    build_validation_prompt, build_validation_calibration_prompt,
+    build_validation_prompt_from_justification, build_validation_calibration_prompt_from_justification,
+    letters_for_order,
 )
 from src.step4b_logit_utils import softmax_restricted, average_yes_over_orderings, calibrate
 
@@ -193,6 +200,20 @@ def main() -> int:
     ap.add_argument("--validation_batch_size", type=int, default=32)
     ap.add_argument("--validation_checkpoint_every", type=int, default=200,
                     help="Save a checkpoint after every N (row,order) validation prompts resolved.")
+    ap.add_argument("--validation_input", default="article", choices=["article", "justification"],
+                    help="2026-11-06: what the validation pass re-checks pass 1's YES verdict "
+                    "against. 'article' (default, unchanged) re-reads the full raw article -- "
+                    "this measured net-negative on job20002898 (122 new FN vs only 96 fixed FP; "
+                    "step3 accuracy fell BELOW the naive-NO baseline), with raw P(yes) crushed to "
+                    "~0.17 even for true positives despite a non-degenerate calibration baseline "
+                    "(p0=0.3932) -- see src/step3_logit_prompts.py's module docstring for the "
+                    "full diagnosis. 'justification' instead reads only pass 1's own "
+                    "keyword_justification (shorter, already-focused on the claimed criticism, "
+                    "no real-article noise/distractors to re-locate), with the question reframed "
+                    "as an explicit validation request rather than confirm/reject-a-prior-"
+                    "conclusion. Not a blind repeat of the pre-2026-10-13 removed pass 2: still "
+                    "scoped to YES rows only, still logit-probing with order-swap + context-free "
+                    "calibration, not free-text generation on every row.")
     ap.add_argument("--skip_validation", action="store_true",
                     help="2026-11-02: disable the validation pass entirely -- no validation "
                     "forward passes are run, and keyword_answer stays exactly pass 1's own "
@@ -455,14 +476,25 @@ def main() -> int:
         # correctly mean "not forced", matching every other NA check this
         # script already does (e.g. keyword_answer_draft.isna()).
         not_forced = (working["keyword_answer_forced"] != "TRUE").fillna(True)
-        validated_idx = working.index[
+        validation_mask = (
             build_mask(working, text_col=args.text_col)
             & (working["keyword_answer"] == "YES")
             & not_forced
-        ].tolist()
+        )
+        if args.validation_input == "justification":
+            # 2026-11-06: this variant has nothing to validate against
+            # without a real justification -- defensive guard, should
+            # already always be true for any non-forced YES row (pass 1
+            # never writes a YES without one; see parse_draft_output).
+            validation_mask = validation_mask & working["keyword_justification"].notna()
+        validated_idx = working.index[validation_mask].tolist()
         n_val_candidates = len(validated_idx)
+        val_input_desc = (
+            "pass 1's own justification" if args.validation_input == "justification"
+            else "the full article"
+        )
         print(f"[validation] Re-checking pass 1's YES verdict for {n_val_candidates:,} rows "
-              f"against the full article...", flush=True)
+              f"against {val_input_desc} (--validation_input={args.validation_input})...", flush=True)
 
         if task_id is not None:
             validation_checkpoint_path = args.output_base + f"_task{task_id}_step3val_checkpoint.parquet"
@@ -471,7 +503,10 @@ def main() -> int:
 
         print("[validation] Computing p0 (this question's own intrinsic yes-bias) on the "
               "empty-article variant...", flush=True)
-        calib_prompts = [build_validation_calibration_prompt(order) for order in (1, 2)]
+        if args.validation_input == "justification":
+            calib_prompts = [build_validation_calibration_prompt_from_justification(order) for order in (1, 2)]
+        else:
+            calib_prompts = [build_validation_calibration_prompt(order) for order in (1, 2)]
         calib_raw = client.logprob_many(
             system_prompt="",
             user_prompts=calib_prompts,
@@ -492,7 +527,10 @@ def main() -> int:
             row = working.loc[row_idx]
             for order in (1, 2):
                 val_flat_keys.append((row_idx, order))
-                val_flat_prompts.append(build_validation_prompt(row, args.text_col, order))
+                if args.validation_input == "justification":
+                    val_flat_prompts.append(build_validation_prompt_from_justification(row, order))
+                else:
+                    val_flat_prompts.append(build_validation_prompt(row, args.text_col, order))
 
         print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
               f"({n_val_candidates:,} rows x 2 orders)", flush=True)
