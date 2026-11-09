@@ -63,6 +63,14 @@ article) after the article-mode pass measured net-negative on job20002898
 -- see src/step3_logit_prompts.py's module docstring for the full
 diagnosis and the justification-mode ablation it motivated.
 
+2026-11-09: added --validation_threshold (default 0.30, was hardcoded to
+0.5) after job20255405 (--validation_input=justification) showed a real,
+correctly-directed signal (p_true 0.464 mean for gold-YES vs 0.374 for
+gold-NO) that a 0.5 cutoff nonetheless over-rejected -- see the
+--validation_threshold argparse help just below for the full numbers.
+0.30 was chosen as a round value on that same job's 235 candidates, not
+validated out-of-sample -- the next run with this default is that check.
+
 Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
                                                        flipped to NO by the validation pass)
                 keyword_answer_draft              -> "YES" | "NO" | NA   (pass 1)
@@ -214,6 +222,21 @@ def main() -> int:
                     "conclusion. Not a blind repeat of the pre-2026-10-13 removed pass 2: still "
                     "scoped to YES rows only, still logit-probing with order-swap + context-free "
                     "calibration, not free-text generation on every row.")
+    ap.add_argument("--validation_threshold", type=float, default=0.30,
+                    help="2026-11-09: decision cutoff on keyword_answer_validation_p_true -- "
+                    "p_true >= threshold keeps pass 1's YES, otherwise flips it to NO. Was "
+                    "hardcoded to 0.5 (never actually tuned, just the natural logit midpoint). "
+                    "job20255405 (--validation_input=justification) showed p_true genuinely "
+                    "separates gold-YES from gold-NO rows (mean 0.464 vs 0.374) but BOTH sit "
+                    "below 0.5, so a 0.5 cutoff over-rejects: step3 recall collapsed 76.8%->32.7% "
+                    "for only a 54.9%->64.7% precision gain (F1 0.640->0.516, net negative vs no "
+                    "validation at all). Re-scoring that same job's 235 candidates at threshold=0.30 "
+                    "gives accuracy 87.7%/F1 0.671, beating the no-validation baseline (81.6%/0.640) "
+                    "-- 48 of 106 original FPs corrected for only 35 TPs lost, a clearly favourable "
+                    "trade vs 0.5's wash. Not yet confirmed out-of-sample (0.30 was picked as a "
+                    "round, non-cherry-picked value on that same job, not a withheld validation "
+                    "set) -- this run is exactly that out-of-sample check. See "
+                    "src/step3_logit_prompts.py's module docstring for the full writeup.")
     ap.add_argument("--skip_validation", action="store_true",
                     help="2026-11-02: disable the validation pass entirely -- no validation "
                     "forward passes are run, and keyword_answer stays exactly pass 1's own "
@@ -494,7 +517,8 @@ def main() -> int:
             else "the full article"
         )
         print(f"[validation] Re-checking pass 1's YES verdict for {n_val_candidates:,} rows "
-              f"against {val_input_desc} (--validation_input={args.validation_input})...", flush=True)
+              f"against {val_input_desc} (--validation_input={args.validation_input}, "
+              f"--validation_threshold={args.validation_threshold})...", flush=True)
 
         if task_id is not None:
             validation_checkpoint_path = args.output_base + f"_task{task_id}_step3val_checkpoint.parquet"
@@ -619,7 +643,7 @@ def main() -> int:
             p_yes_corrected = calibrate(p_yes, p0)
             working.at[row_idx, "keyword_answer_validation_p_true"] = p_yes_corrected
 
-            if p_yes_corrected >= 0.5:
+            if p_yes_corrected >= args.validation_threshold:
                 working.at[row_idx, "keyword_answer_validated"] = "TRUE"
             else:
                 working.at[row_idx, "keyword_answer_validated"] = "FALSE"

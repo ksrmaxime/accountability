@@ -103,6 +103,17 @@ SKIP_VALIDATION=${SKIP_VALIDATION:-0}   # 0 = validation pass runs (first test o
 # to run this test.
 VALIDATION_INPUT=${VALIDATION_INPUT:-article}
 
+# 2026-11-09: job20255405 (VALIDATION_INPUT=justification) showed a real,
+# correctly-directed signal (p_true mean 0.464 for gold-YES vs 0.374 for
+# gold-NO) but the hardcoded 0.5 cutoff over-rejected (recall 76.8%->32.7%
+# for only a 54.9%->64.7% precision gain, F1 0.640->0.516, net negative vs
+# no validation). Re-scoring that job's 235 candidates at threshold=0.30
+# gives F1 0.671 (vs 0.640 with no validation at all) -- a clearly better
+# trade (48 of 106 FPs corrected for only 35 TPs lost). Not yet confirmed
+# out-of-sample -- see src/step3_criticism_detection.py's --validation_threshold
+# help for the full numbers. This run is that out-of-sample check.
+VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD:-0.30}
+
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step3_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
 # =============================================================================
@@ -138,7 +149,7 @@ echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
-echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT}"
+echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT} | VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD}"
 
 SKIP_VALIDATION_FLAG=()
 if [[ "${SKIP_VALIDATION}" == "1" ]]; then
@@ -168,6 +179,7 @@ python scripts/step3_criticism_detection.py \
   --validation_batch_size   "$VALIDATION_BATCH_SIZE" \
   --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
   --validation_input        "$VALIDATION_INPUT" \
+  --validation_threshold    "$VALIDATION_THRESHOLD" \
   --num_tasks         "$NUM_TASKS" \
   "${SKIP_VALIDATION_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
