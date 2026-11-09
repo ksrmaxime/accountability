@@ -58,10 +58,10 @@ Forced rows (keyword_answer_forced == "TRUE") skip this pass entirely,
 same convention as the old pass 2. Toggle with --skip_validation (see
 sbatch_step3_array.sh's SKIP_VALIDATION).
 
-2026-11-06: added --validation_input (article|justification, default
-article) after the article-mode pass measured net-negative on job20002898
--- see src/step3_logit_prompts.py's module docstring for the full
-diagnosis and the justification-mode ablation it motivated.
+2026-11-06: added --validation_input (article|justification) after the
+article-mode pass measured net-negative on job20002898 -- see
+src/step3_logit_prompts.py's module docstring for the full diagnosis and
+the justification-mode ablation it motivated.
 
 2026-11-09: added --validation_threshold (default 0.30, was hardcoded to
 0.5) after job20255405 (--validation_input=justification) showed a real,
@@ -70,6 +70,16 @@ gold-NO) that a 0.5 cutoff nonetheless over-rejected -- see the
 --validation_threshold argparse help just below for the full numbers.
 0.30 was chosen as a round value on that same job's 235 candidates, not
 validated out-of-sample -- the next run with this default is that check.
+
+2026-11-09 (later same day): --validation_input's default changed from
+"article" to "justification". job20310461 accidentally re-ran in "article"
+mode (the sbatch call omitted VALIDATION_INPUT=justification, so it
+silently fell back to the old default) and reproduced the exact same
+near-total-rejection failure as job20002898 (0/237 kept, step3 accuracy
+77.7%, below the 78.7% naive-NO baseline) -- a costly way to relearn that
+"article" is the broken mode. Making "justification" the default removes
+that footgun: a bare `sbatch sbatch_step3_array.sh <input>` with no env
+vars now runs the mode that has actually measured net-positive.
 
 Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
                                                        flipped to NO by the validation pass)
@@ -208,20 +218,26 @@ def main() -> int:
     ap.add_argument("--validation_batch_size", type=int, default=32)
     ap.add_argument("--validation_checkpoint_every", type=int, default=200,
                     help="Save a checkpoint after every N (row,order) validation prompts resolved.")
-    ap.add_argument("--validation_input", default="article", choices=["article", "justification"],
+    ap.add_argument("--validation_input", default="justification", choices=["article", "justification"],
                     help="2026-11-06: what the validation pass re-checks pass 1's YES verdict "
-                    "against. 'article' (default, unchanged) re-reads the full raw article -- "
-                    "this measured net-negative on job20002898 (122 new FN vs only 96 fixed FP; "
-                    "step3 accuracy fell BELOW the naive-NO baseline), with raw P(yes) crushed to "
-                    "~0.17 even for true positives despite a non-degenerate calibration baseline "
+                    "against. 'article' re-reads the full raw article -- this measured net-"
+                    "negative on job20002898 (122 new FN vs only 96 fixed FP; step3 accuracy "
+                    "fell BELOW the naive-NO baseline), with raw P(yes) crushed to ~0.17 even "
+                    "for true positives despite a non-degenerate calibration baseline "
                     "(p0=0.3932) -- see src/step3_logit_prompts.py's module docstring for the "
-                    "full diagnosis. 'justification' instead reads only pass 1's own "
+                    "full diagnosis. 'justification' (DEFAULT since 2026-11-09, after job20310461 "
+                    "accidentally re-ran 'article' mode by omitting this flag and reproduced that "
+                    "same near-total-rejection failure almost exactly -- 0/237 kept, accuracy "
+                    "77.7%, again below baseline) instead reads only pass 1's own "
                     "keyword_justification (shorter, already-focused on the claimed criticism, "
                     "no real-article noise/distractors to re-locate), with the question reframed "
                     "as an explicit validation request rather than confirm/reject-a-prior-"
                     "conclusion. Not a blind repeat of the pre-2026-10-13 removed pass 2: still "
                     "scoped to YES rows only, still logit-probing with order-swap + context-free "
-                    "calibration, not free-text generation on every row.")
+                    "calibration, not free-text generation on every row. job20255405 confirmed "
+                    "this mode gives a real, correctly-directed signal (p_true 0.464 mean for "
+                    "gold-YES vs 0.374 for gold-NO) -- see --validation_threshold for the "
+                    "cutoff tuning that goes with it.")
     ap.add_argument("--validation_threshold", type=float, default=0.30,
                     help="2026-11-09: decision cutoff on keyword_answer_validation_p_true -- "
                     "p_true >= threshold keeps pass 1's YES, otherwise flips it to NO. Was "

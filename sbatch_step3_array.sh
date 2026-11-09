@@ -95,13 +95,17 @@ SKIP_VALIDATION=${SKIP_VALIDATION:-0}   # 0 = validation pass runs (first test o
 # article was itself crushed to ~0.17 even for true positives, while the
 # content-free calibration article alone scored HIGHER. See
 # src/step3_logit_prompts.py's module docstring for the full diagnosis.
-# VALIDATION_INPUT=justification is the resulting ablation: re-checks
-# pass 1's own justification text (already-focused, no real-article
-# noise to re-locate) instead of the raw article, with the question
-# reframed as an explicit validation request. Default kept at "article"
-# (unchanged) so nothing changes silently -- set VALIDATION_INPUT=justification
-# to run this test.
-VALIDATION_INPUT=${VALIDATION_INPUT:-article}
+# VALIDATION_INPUT=justification re-checks pass 1's own justification text
+# (already-focused, no real-article noise to re-locate) instead of the raw
+# article, with the question reframed as an explicit validation request.
+# 2026-11-09: made the DEFAULT after job20310461 accidentally omitted this
+# var, silently fell back to the old "article" default, and reproduced the
+# exact same near-total-rejection failure as job20002898 (0/237 kept,
+# accuracy 77.7%, below baseline) -- a bare `sbatch sbatch_step3_array.sh
+# <input>` now runs the mode that has actually measured net-positive.
+# Set VALIDATION_INPUT=article explicitly if you ever want the old (known
+# broken) mode back for comparison.
+VALIDATION_INPUT=${VALIDATION_INPUT:-justification}
 
 # 2026-11-09: job20255405 (VALIDATION_INPUT=justification) showed a real,
 # correctly-directed signal (p_true mean 0.464 for gold-YES vs 0.374 for
