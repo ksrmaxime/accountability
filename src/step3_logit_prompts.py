@@ -205,13 +205,61 @@ CALIBRATION_ARTICLE = "N/A"
 # question, to test whether a shorter, already-focused input avoids the
 # near-universal over-rejection measured in --validation_input=article
 # mode (job20002898).
+#
+# 2026-11-13: {admin_caution} added as an optional extra paragraph (empty
+# string when it doesn't apply). job20479169 (--validation_threshold=0.30)
+# still kept 57 false positives, and they are NOT a random slice of the 238
+# candidates: target_type=Administrative Unit is 31.5% of all candidates
+# but 45.6% of these remaining errors (1.45x over-represented), Federal
+# Department 14.3%->22.8% (1.6x); target_type=Federal Councillor, by
+# contrast, is UNDER-represented (48.7%->22.8%, 0.47x) -- named politicians
+# are already handled well, bureaucratic bodies are not. Reading the top
+# (highest-p, most confidently wrong) justifications by hand showed the
+# same shape every time: the agency is blamed for "not enforcing",
+# "allowing", "not communicating" something -- phrasing that reads as a
+# direct reproach in isolation, but in the original article the decision
+# being criticized often belongs to a minister, the Federal Council, or a
+# law the agency merely administers (see VALIDATION_EXAMPLES #8 for the
+# same pattern -- apparently one worked example isn't enough for the model
+# to generalise this reliably for bureaucratic targets specifically).
+# Since this pass never sees the article, it can't verify that distinction
+# from scratch -- but it already has `target_type` as free, non-article
+# metadata, so the fix is a conditional nudge (see needs_admin_caution())
+# rather than re-introducing full-article noise.
+ADMIN_CAUTION_TARGET_TYPES = frozenset({
+    "Administrative Unit", "Federal Department", "Independent Agency",
+})
+
+ADMIN_UNIT_CAUTION = """
+Extra caution for a government agency, office, department, or administrative unit (as opposed \
+to a named individual such as a minister): this type of entity often appears in a justification \
+as having "failed to enforce", "not applied", "not communicated", or "allowed" something -- \
+phrasing that can sound like a direct reproach even when the actual decision or policy being \
+criticized in the original article was made by a minister, the Federal Council, parliament, or \
+a law, and the agency is only the body that carries it out or administers it. If the \
+justification does not clearly show that the agency exercised its OWN discretion, judgment, or \
+responsibility -- rather than merely implementing, enforcing, or being bound by a decision made \
+elsewhere -- do not validate it.\
+"""
+
+
+def needs_admin_caution(target_type) -> bool:
+    """True unless target_type is explicitly 'Federal Councillor' (a named
+    individual, already validated reliably without this caution) --
+    missing/unknown target_type defaults to True (the conservative side,
+    given the caution only ever makes validation MORE skeptical, never
+    less, so defaulting it on for an unrecognised type can't introduce a
+    new failure mode)."""
+    return str(target_type).strip() != "Federal Councillor"
+
+
 VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION = """\
 You are a media analysis assistant specialised in Swiss public affairs. Below is the \
 justification an automated analysis wrote to support its claim that "{keyword}" is criticized \
 in a news article. Your task is to validate whether this justification actually holds up.
 
 {definition}
-
+{admin_caution}
 JUSTIFICATION TO VALIDATE:
 {justification_text}
 
@@ -282,11 +330,14 @@ def build_validation_calibration_prompt(order: int) -> str:
     return _build_prompt(CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order)
 
 
-def _build_prompt_from_justification(keyword: str, justification_text: str, order: int) -> str:
+def _build_prompt_from_justification(
+    keyword: str, justification_text: str, order: int, admin_caution: bool = False,
+) -> str:
     letter_yes, letter_no = letters_for_order(order)
     return VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION.format(
         keyword=keyword,
         definition=VALIDATION_DEFINITION,
+        admin_caution=(ADMIN_UNIT_CAUTION if admin_caution else ""),
         justification_text=justification_text,
         examples_block=_EXAMPLES_BLOCK,
         letter_yes=letter_yes,
@@ -299,15 +350,32 @@ def build_validation_prompt_from_justification(row: pd.Series, order: int) -> st
     1's own keyword_justification instead of the raw article -- see this
     file's module docstring for why. `row` must already have a non-null
     keyword_justification (callers should filter for that, same as they
-    already filter for keyword_answer == "YES" and not-forced)."""
+    already filter for keyword_answer == "YES" and not-forced).
+
+    2026-11-13: includes ADMIN_UNIT_CAUTION whenever row['target_type']
+    isn't 'Federal Councillor' (see needs_admin_caution()) -- callers that
+    also need to know whether the caution was used (to pick the matching
+    p0 -- see --validation_threshold's calibration split in
+    scripts/step3_criticism_detection.py) should call needs_admin_caution()
+    themselves on the same row rather than re-deriving it."""
     alias = row.get("matched_alias", None)
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     justification = "" if pd.isna(row.get("keyword_justification")) else str(row["keyword_justification"]).strip()
-    return _build_prompt_from_justification(keyword, justification, order)
+    admin_caution = needs_admin_caution(row.get("target_type"))
+    return _build_prompt_from_justification(keyword, justification, order, admin_caution=admin_caution)
 
 
-def build_validation_calibration_prompt_from_justification(order: int) -> str:
+def build_validation_calibration_prompt_from_justification(order: int, admin_caution: bool = False) -> str:
     """Context-free calibration for the justification-input variant --
     same idea as build_validation_calibration_prompt, but using the
-    neutral justification-shaped placeholder instead of an empty article."""
-    return _build_prompt_from_justification(CALIBRATION_KEYWORD, CALIBRATION_JUSTIFICATION, order)
+    neutral justification-shaped placeholder instead of an empty article.
+
+    2026-11-13: takes `admin_caution` because ADMIN_UNIT_CAUTION changes
+    the prompt text itself, so the "this question's own intrinsic yes-
+    bias" it measures is NOT the same value with and without it -- callers
+    must compute p0 separately for admin_caution=True and
+    admin_caution=False, and apply each to the matching rows (see
+    scripts/step3_criticism_detection.py's validation block)."""
+    return _build_prompt_from_justification(
+        CALIBRATION_KEYWORD, CALIBRATION_JUSTIFICATION, order, admin_caution=admin_caution,
+    )
