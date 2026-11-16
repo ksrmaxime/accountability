@@ -40,7 +40,8 @@ MAX_INPUT_TOKENS=16384
 TEMPERATURE=0.0
 
 # Pass 2 (verify) -- reads only the pass-1 justification, not the article,
-# so it needs a much smaller batch/context than pass 1 above.
+# so it needs a much smaller batch/context than pass 1 above. Kept, unused
+# (see scripts/step4a_source_attribution.py -- pass 2 removed 2026-10-13).
 VERIFY_BATCH_SIZE=16
 VERIFY_MAX_NEW_TOKENS=40
 VERIFY_MAX_INPUT_TOKENS=512
@@ -51,6 +52,24 @@ VERIFY_TEMPERATURE=0.0
 # (see src/verify_utils.py and the retry/force block in the script).
 DRAFT_MAX_RETRIES=2
 RETRY_TEMPERATURE=0.4
+
+# Validation pass (2026-11-16 "validate-on-justification", logit-probing) --
+# MIRROR of step3's own validation pass (sbatch_step3_array.sh), not a
+# copy: step4a's error on job20479169 is FN-heavy (20 FN vs 4 FP on the
+# 95-row YES-gated population, accuracy 74.7% BELOW the 82.1% majority
+# baseline), the opposite imbalance from step3's FP-heavy error -- so this
+# pass is scoped to JOURNALIST rows and can only ever flip
+# JOURNALIST->SOURCED, never the reverse. Same calibrated-logit machinery
+# (one forward pass, order-swap, context-free calibration) as step3/
+# step4b. See src/step4a_logit_prompts.py and
+# scripts/step4a_source_attribution.py's module docstrings for the full
+# design rationale.
+CANDIDATE_LETTERS=A,B
+VALIDATION_BATCH_SIZE=32
+VALIDATION_CHECKPOINT_EVERY=200
+SKIP_VALIDATION=${SKIP_VALIDATION:-0}   # 0 = validation pass runs (first test of this new mechanism); set SKIP_VALIDATION=1 to disable without touching code if it measures net-negative.
+VALIDATION_INPUT=${VALIDATION_INPUT:-justification}   # by analogy with step3's own finding (article mode measured net-negative there) -- NOT yet independently confirmed for step4a; set VALIDATION_INPUT=article to test the alternative if this underperforms.
+VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD:-0.5}   # neutral logit midpoint, NOT yet empirically tuned -- see --validation_threshold's own help text in the python script. This run's p_sourced distribution is the first real data point for tuning it.
 
 NUM_TASKS=${NUM_TASKS:-9}   # doit correspondre au nombre de taches dans --array (0-8 = 9 taches) -- surchargeable : NUM_TASKS=1 sbatch --array=0-0 sbatch_step4a_array.sh <input> pour un run rapide sur un petit echantillon (ex. les 400 lignes gold)
 
@@ -87,6 +106,12 @@ echo "MODEL=${MODEL_PATH} | DTYPE=${DTYPE} | BACKEND=${BACKEND}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
+echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT} | VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD}"
+
+SKIP_VALIDATION_FLAG=()
+if [[ "${SKIP_VALIDATION}" == "1" ]]; then
+    SKIP_VALIDATION_FLAG=(--skip_validation)
+fi
 
 python scripts/step4a_source_attribution.py \
   --input             "$INPUT" \
@@ -107,7 +132,13 @@ python scripts/step4a_source_attribution.py \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
   --draft_max_retries       "$DRAFT_MAX_RETRIES" \
   --retry_temperature       "$RETRY_TEMPERATURE" \
-  --num_tasks         "$NUM_TASKS"
+  --candidate_letters       "$CANDIDATE_LETTERS" \
+  --validation_batch_size   "$VALIDATION_BATCH_SIZE" \
+  --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
+  --validation_input        "$VALIDATION_INPUT" \
+  --validation_threshold    "$VALIDATION_THRESHOLD" \
+  --num_tasks         "$NUM_TASKS" \
+  "${SKIP_VALIDATION_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 
 echo "Task ${SLURM_ARRAY_TASK_ID} terminee."
