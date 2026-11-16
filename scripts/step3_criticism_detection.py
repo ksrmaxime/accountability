@@ -83,22 +83,23 @@ vars now runs the mode that has actually measured net-positive.
 
 2026-11-13: added ADMIN_UNIT_CAUTION (src/step3_logit_prompts.py), an
 extra prompt paragraph included whenever a candidate row's target_type
-isn't "Federal Councillor". job20479169 (justification mode, threshold
-0.30) still kept 57 false positives, and they were NOT a random slice --
-Administrative Unit was 1.45x over-represented in them relative to its
-share of all candidates, Federal Department 1.6x, while Federal
-Councillor was under-represented (0.47x). Reading the highest-confidence
-wrong keeps by hand showed the same shape every time: the justification
-blames an agency for "not enforcing"/"allowing"/"not communicating"
-something, which reads as a direct reproach on its own even when the
-original article's actual target was a minister, the Federal Council, or
-a law the agency merely administers -- a blind spot this pass can't avoid
-by re-reading (it never sees the article), so the fix uses target_type
-(already-available metadata, not a re-read) to add a targeted caution
-only for bureaucratic/institutional targets, leaving the already-reliable
-Federal Councillor rows untouched. Needs its own p0 (yes-bias changes with
-the extra prompt text) -- see the calibration split just above in the
-validation pass below. Not yet confirmed on a real run.
+isn't "Federal Councillor", targeting exactly this project's own-
+diagnosed FP concentration on bureaucratic/institutional targets (see
+that file's module docstring). REVERTED the same day: deployed on
+job20496316 and checked with a controlled paired comparison against
+job20479169 (same 234 article+keyword pairs that were YES-candidates in
+both runs) -- for the 119 of those rows with target_type != "Federal
+Councillor" (i.e. that should have received the caution), mean
+keyword_answer_validation_p_true went UP, 0.532 -> 0.582, not down (only
+39/119, 33%, moved the intended direction). Globally FP rose 57->63 and
+the Administrative-Unit over-representation among errors got worse
+(1.45x->1.65x), for only a marginal F1 gain (0.594->0.600) bought with a
+precision loss (0.625->0.611) -- the wrong trade given this project's
+explicit precision-over-recall preference. The caution, though correctly
+wired (mock-verified pre-deployment), measurably failed to make the real
+model more skeptical on these targets. Fully reverted -- single p0
+calibration restored below, ADMIN_UNIT_CAUTION/needs_admin_caution removed
+from src/step3_logit_prompts.py.
 
 Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
                                                        flipped to NO by the validation pass)
@@ -148,7 +149,7 @@ from src.verify_utils import parse_label_only, parse_draft_labeled
 from src.step3_logit_prompts import (
     build_validation_prompt, build_validation_calibration_prompt,
     build_validation_prompt_from_justification, build_validation_calibration_prompt_from_justification,
-    needs_admin_caution, letters_for_order,
+    letters_for_order,
 )
 from src.step4b_logit_utils import softmax_restricted, average_yes_over_orderings, calibrate
 
@@ -563,18 +564,7 @@ def main() -> int:
         print("[validation] Computing p0 (this question's own intrinsic yes-bias) on the "
               "empty-article variant...", flush=True)
         if args.validation_input == "justification":
-            # 2026-11-13: ADMIN_UNIT_CAUTION (src/step3_logit_prompts.py)
-            # changes the prompt text for any row whose target_type isn't
-            # "Federal Councillor" (see needs_admin_caution()), so this
-            # question's own intrinsic yes-bias is NOT one number any more
-            # -- it must be measured once per prompt variant and applied
-            # only to the rows that actually used that variant, or every
-            # admin-caution row would be calibrated against the wrong
-            # baseline.
-            calib_prompts = (
-                [build_validation_calibration_prompt_from_justification(order, admin_caution=False) for order in (1, 2)]
-                + [build_validation_calibration_prompt_from_justification(order, admin_caution=True) for order in (1, 2)]
-            )
+            calib_prompts = [build_validation_calibration_prompt_from_justification(order) for order in (1, 2)]
         else:
             calib_prompts = [build_validation_calibration_prompt(order) for order in (1, 2)]
         calib_raw = client.logprob_many(
@@ -584,27 +574,15 @@ def main() -> int:
             max_input_tokens=args.max_input_tokens,
         )
         p_yes_by_order = {}
-        for order, logits_dict in zip((1, 2), calib_raw[0:2]):
+        for order, logits_dict in zip((1, 2), calib_raw):
             probs = softmax_restricted(logits_dict)
             letter_yes, _letter_no = letters_for_order(order)
             p_yes_by_order[order] = probs.get(letter_yes, float("nan"))
         p0 = average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
-        if args.validation_input == "justification":
-            p_yes_by_order_admin = {}
-            for order, logits_dict in zip((1, 2), calib_raw[2:4]):
-                probs = softmax_restricted(logits_dict)
-                letter_yes, _letter_no = letters_for_order(order)
-                p_yes_by_order_admin[order] = probs.get(letter_yes, float("nan"))
-            p0_admin = average_yes_over_orderings(p_yes_by_order_admin[1], p_yes_by_order_admin[2])
-            print(f"  p0 (no admin caution) = {p0:.4f}", flush=True)
-            print(f"  p0 (admin caution)    = {p0_admin:.4f}", flush=True)
-        else:
-            p0_admin = p0  # unused outside justification mode, kept defined for uniform access below
-            print(f"  p0 = {p0:.4f}", flush=True)
+        print(f"  p0 = {p0:.4f}", flush=True)
 
         val_flat_keys = []    # (row_idx, order)
         val_flat_prompts = []
-        val_row_admin_caution = {}  # row_idx -> bool, justification mode only (default False elsewhere)
         for row_idx in validated_idx:
             row = working.loc[row_idx]
             for order in (1, 2):
@@ -613,8 +591,6 @@ def main() -> int:
                     val_flat_prompts.append(build_validation_prompt_from_justification(row, order))
                 else:
                     val_flat_prompts.append(build_validation_prompt(row, args.text_col, order))
-            if args.validation_input == "justification":
-                val_row_admin_caution[row_idx] = needs_admin_caution(row.get("target_type"))
 
         print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
               f"({n_val_candidates:,} rows x 2 orders)", flush=True)
@@ -691,8 +667,7 @@ def main() -> int:
                     val_any_nan = True
 
             p_yes = average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
-            row_p0 = p0_admin if val_row_admin_caution.get(row_idx, False) else p0
-            if pd.isna(p_yes) or pd.isna(row_p0):
+            if pd.isna(p_yes) or pd.isna(p0):
                 val_any_nan = True
 
             if val_any_nan:
@@ -701,7 +676,7 @@ def main() -> int:
                 n_val_incomplete += 1
                 continue
 
-            p_yes_corrected = calibrate(p_yes, row_p0)
+            p_yes_corrected = calibrate(p_yes, p0)
             working.at[row_idx, "keyword_answer_validation_p_true"] = p_yes_corrected
 
             if p_yes_corrected >= args.validation_threshold:

@@ -120,6 +120,47 @@ This is NOT simply reverting to the pre-2026-10-13 removed pass 2:
     else's fault) even though pass 1 labeled it YES.
 Toggle via --validation_input article|justification (default: article,
 unchanged) -- see scripts/step3_criticism_detection.py.
+
+2026-11-13 ADMIN_UNIT_CAUTION -- ADDED THEN REVERTED SAME DAY. job20479169's
+57 remaining false positives were shown to be concentrated on bureaucratic/
+institutional targets (target_type=Administrative Unit 1.45x over-
+represented among errors vs candidates, Federal Department 1.6x, while
+Federal Councillor was 0.47x under-represented), with a consistent read-
+through pattern: the agency blamed for "not enforcing"/"allowing"/"not
+communicating" a decision actually made by a minister, the Federal
+Council, or a law it merely administers. A conditional extra-caution
+paragraph (shown only when target_type != "Federal Councillor", via
+needs_admin_caution()) was added to VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION,
+with its own dual context-free calibration (p0 vs p0_admin) so the
+caution's own intrinsic yes-bias was measured and removed separately from
+the no-caution baseline. Mechanically verified correct pre-deployment
+(mock harness, see /home/claude/step3_val_test/repo/src/client.py's K6/K7
+cases: identical MARKER_MID text, caution lowers p_true from 0.31 to
+0.168).
+
+Deployed on job20496316, then checked against a controlled paired
+comparison: of the 234 article+keyword pairs that were YES-candidates in
+BOTH job20479169 (no caution) and job20496316 (with caution), 119 have
+target_type != "Federal Councillor" (i.e. should have received the
+caution). Mean keyword_answer_validation_p_true for exactly these 119
+rows went UP, 0.532 -> 0.582, not down -- only 39/119 (33%) moved in the
+intended direction, several of the rest by a lot (DFAE/EDA +0.23,
+Schweizer Armee +0.20 to +0.25 on multiple rows, EFD +0.15). Globally,
+FP rose 57->63 (worse), FN fell 73->69, and the Administrative-Unit over-
+representation among remaining errors got WORSE, not better (1.45x ->
+1.65x). Net effect on the full confusion matrix: precision 0.625->0.611
+(worse), recall 0.566->0.589 (better), F1 0.594->0.600 (flat-to-slightly-
+better) -- a precision loss for essentially no reliable gain, the wrong
+trade given this project's explicit precision-over-recall preference.
+Conclusion: the caution text, despite being correctly wired, does not
+reliably make the real model more skeptical on these targets -- whether
+because it isn't semantically heeded or because the extra text perturbs
+the raw logit/calibration in an unrelated way was not established before
+reverting (the SLURM logs' printed p0 vs p0_admin would help distinguish
+these but weren't available at decision time). REVERTED in full -- see
+git history / this file's prior version for the admin_caution machinery
+if a future attempt wants to try a different wording or mechanism instead
+of reintroducing this same text.
 """
 from __future__ import annotations
 import pandas as pd
@@ -206,60 +247,16 @@ CALIBRATION_ARTICLE = "N/A"
 # near-universal over-rejection measured in --validation_input=article
 # mode (job20002898).
 #
-# 2026-11-13: {admin_caution} added as an optional extra paragraph (empty
-# string when it doesn't apply). job20479169 (--validation_threshold=0.30)
-# still kept 57 false positives, and they are NOT a random slice of the 238
-# candidates: target_type=Administrative Unit is 31.5% of all candidates
-# but 45.6% of these remaining errors (1.45x over-represented), Federal
-# Department 14.3%->22.8% (1.6x); target_type=Federal Councillor, by
-# contrast, is UNDER-represented (48.7%->22.8%, 0.47x) -- named politicians
-# are already handled well, bureaucratic bodies are not. Reading the top
-# (highest-p, most confidently wrong) justifications by hand showed the
-# same shape every time: the agency is blamed for "not enforcing",
-# "allowing", "not communicating" something -- phrasing that reads as a
-# direct reproach in isolation, but in the original article the decision
-# being criticized often belongs to a minister, the Federal Council, or a
-# law the agency merely administers (see VALIDATION_EXAMPLES #8 for the
-# same pattern -- apparently one worked example isn't enough for the model
-# to generalise this reliably for bureaucratic targets specifically).
-# Since this pass never sees the article, it can't verify that distinction
-# from scratch -- but it already has `target_type` as free, non-article
-# metadata, so the fix is a conditional nudge (see needs_admin_caution())
-# rather than re-introducing full-article noise.
-ADMIN_CAUTION_TARGET_TYPES = frozenset({
-    "Administrative Unit", "Federal Department", "Independent Agency",
-})
-
-ADMIN_UNIT_CAUTION = """
-Extra caution for a government agency, office, department, or administrative unit (as opposed \
-to a named individual such as a minister): this type of entity often appears in a justification \
-as having "failed to enforce", "not applied", "not communicated", or "allowed" something -- \
-phrasing that can sound like a direct reproach even when the actual decision or policy being \
-criticized in the original article was made by a minister, the Federal Council, parliament, or \
-a law, and the agency is only the body that carries it out or administers it. If the \
-justification does not clearly show that the agency exercised its OWN discretion, judgment, or \
-responsibility -- rather than merely implementing, enforcing, or being bound by a decision made \
-elsewhere -- do not validate it.\
-"""
-
-
-def needs_admin_caution(target_type) -> bool:
-    """True unless target_type is explicitly 'Federal Councillor' (a named
-    individual, already validated reliably without this caution) --
-    missing/unknown target_type defaults to True (the conservative side,
-    given the caution only ever makes validation MORE skeptical, never
-    less, so defaulting it on for an unrecognised type can't introduce a
-    new failure mode)."""
-    return str(target_type).strip() != "Federal Councillor"
-
-
+# (2026-11-13: an ADMIN_UNIT_CAUTION conditional nudge was tried here and
+# reverted the same day -- see the module docstring's "ADDED THEN REVERTED"
+# entry for the full rationale and the empirical result that killed it.)
 VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION = """\
 You are a media analysis assistant specialised in Swiss public affairs. Below is the \
 justification an automated analysis wrote to support its claim that "{keyword}" is criticized \
 in a news article. Your task is to validate whether this justification actually holds up.
 
 {definition}
-{admin_caution}
+
 JUSTIFICATION TO VALIDATE:
 {justification_text}
 
@@ -330,14 +327,11 @@ def build_validation_calibration_prompt(order: int) -> str:
     return _build_prompt(CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order)
 
 
-def _build_prompt_from_justification(
-    keyword: str, justification_text: str, order: int, admin_caution: bool = False,
-) -> str:
+def _build_prompt_from_justification(keyword: str, justification_text: str, order: int) -> str:
     letter_yes, letter_no = letters_for_order(order)
     return VALIDATION_QUESTION_TEMPLATE_JUSTIFICATION.format(
         keyword=keyword,
         definition=VALIDATION_DEFINITION,
-        admin_caution=(ADMIN_UNIT_CAUTION if admin_caution else ""),
         justification_text=justification_text,
         examples_block=_EXAMPLES_BLOCK,
         letter_yes=letter_yes,
@@ -350,32 +344,15 @@ def build_validation_prompt_from_justification(row: pd.Series, order: int) -> st
     1's own keyword_justification instead of the raw article -- see this
     file's module docstring for why. `row` must already have a non-null
     keyword_justification (callers should filter for that, same as they
-    already filter for keyword_answer == "YES" and not-forced).
-
-    2026-11-13: includes ADMIN_UNIT_CAUTION whenever row['target_type']
-    isn't 'Federal Councillor' (see needs_admin_caution()) -- callers that
-    also need to know whether the caution was used (to pick the matching
-    p0 -- see --validation_threshold's calibration split in
-    scripts/step3_criticism_detection.py) should call needs_admin_caution()
-    themselves on the same row rather than re-deriving it."""
+    already filter for keyword_answer == "YES" and not-forced)."""
     alias = row.get("matched_alias", None)
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
     justification = "" if pd.isna(row.get("keyword_justification")) else str(row["keyword_justification"]).strip()
-    admin_caution = needs_admin_caution(row.get("target_type"))
-    return _build_prompt_from_justification(keyword, justification, order, admin_caution=admin_caution)
+    return _build_prompt_from_justification(keyword, justification, order)
 
 
-def build_validation_calibration_prompt_from_justification(order: int, admin_caution: bool = False) -> str:
+def build_validation_calibration_prompt_from_justification(order: int) -> str:
     """Context-free calibration for the justification-input variant --
     same idea as build_validation_calibration_prompt, but using the
-    neutral justification-shaped placeholder instead of an empty article.
-
-    2026-11-13: takes `admin_caution` because ADMIN_UNIT_CAUTION changes
-    the prompt text itself, so the "this question's own intrinsic yes-
-    bias" it measures is NOT the same value with and without it -- callers
-    must compute p0 separately for admin_caution=True and
-    admin_caution=False, and apply each to the matching rows (see
-    scripts/step3_criticism_detection.py's validation block)."""
-    return _build_prompt_from_justification(
-        CALIBRATION_KEYWORD, CALIBRATION_JUSTIFICATION, order, admin_caution=admin_caution,
-    )
+    neutral justification-shaped placeholder instead of an empty article."""
+    return _build_prompt_from_justification(CALIBRATION_KEYWORD, CALIBRATION_JUSTIFICATION, order)
