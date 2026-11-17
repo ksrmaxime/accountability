@@ -73,10 +73,44 @@ retry on a pass-2 parse failure (unlike pass 1's own retry ladder): the
 fail-safe default is to keep pass 1's JOURNALIST either way, the affected
 population is small (~60-95/800 rows), and the goal here is a scoped,
 simple fix to test, not another retry ladder. Toggle with --skip_pass2
-(see sbatch_step4a_array.sh's SKIP_PASS2). Not yet confirmed on a real run.
+(see sbatch_step4a_array.sh's SKIP_PASS2). Confirmed on job20620441: 95-row
+YES-gated population, accuracy 75.8% (pass 1 alone) -> 83.2% (final),
+FIRST TIME above the 82.1% majority baseline for this step.
+
+2026-11-18 pass 3 ("pass2 coherence check", logit-probing): reading
+job20620441's 32 pass-2-touched rows line by line found roughly half of
+pass 2's 27 flips are self-contradictory -- the model's OWN written
+reasoning concludes JOURNALIST-style things ("no outside voice is
+credited", "framed as the author's own opinion", even explicitly naming
+the article's byline journalist as "the actor") and then the bare final
+word it commits to is SOURCED anyway. Precisely: 11/27 flips are "clean"
+(genuinely name a real outside voice, 82% precision -- the forced-
+enumeration idea working as intended); the other 16 are this self-
+contradiction, a near-exact coin flip (8 right / 8 wrong) that happens to
+net to zero on this one run only because the touched population is
+majority-SOURCED -- noise, not a result. Two fixes were tried against
+this run's real justification texts before picking one: deterministic
+Python rules (bag-of-phrases: 18/32 rows AMBIGUOUS, the model routinely
+names a candidate actor AND negates their relevance in the same
+paragraph, which plain keyword counting cannot resolve; "last occurring
+phrase wins", mirroring src/verify_utils.py's own _find_label: resolves
+the ambiguity but changes 17/32 decisions, only 9 of which are real
+corrections against 8 regressions -- net +1/32, indistinguishable from
+noise). Replaced by a narrow THIRD logit-probing pass
+(src/step4a_pass2_coherence_logit_prompts.py) that reads ONLY pass 2's
+own justification text (never the article, never pass 1's justification)
+and asks a bounded reading-comprehension question -- "what does THIS
+PARAGRAPH itself conclude?" -- rather than re-deciding the real-world
+question the way the removed 2026-11-16 validation pass tried and failed
+to. See that file's own module docstring for the full rationale. Only
+OVERRIDES pass 2's stated answer when the calibrated reading clearly
+disagrees (--coherence_margin around the 0.5 boundary); an unclear or
+agreeing read leaves pass 2's own answer untouched. Toggle with
+--skip_coherence. Not yet confirmed on a real run.
 
 Output columns: source_attribution                   -> "SOURCED" | "JOURNALIST" | NA  (FINAL --
-                                                          possibly flipped to SOURCED by pass 2)
+                                                          pass 1, possibly flipped by pass 2,
+                                                          possibly overridden by pass 3)
                 source_attribution_draft              -> "SOURCED" | "JOURNALIST" | NA  (pass 1)
                 source_attribution_justification      -> free text | NA                 (pass 1)
                 source_attribution_before_pass2        -> "JOURNALIST" | NA  (pass 1's own verdict,
@@ -85,9 +119,17 @@ Output columns: source_attribution                   -> "SOURCED" | "JOURNALIST"
                 source_attribution_pass2_justification -> free text | NA (pass 2's own re-search,
                                                           only set for rows pass 2 looked at)
                 source_attribution_pass2_answer        -> "SOURCED" | "JOURNALIST" | NA (pass 2's
-                                                          own verdict; NA = pass 2 ran but its
-                                                          output didn't parse -- pass 1's
-                                                          JOURNALIST is kept either way)
+                                                          own stated verdict, BEFORE pass 3's
+                                                          coherence check; NA = pass 2 ran but its
+                                                          output didn't parse)
+                source_attribution_pass2_coherence_p_sourced -> calibrated P(pass 2's own
+                                                          justification concludes SOURCED), or NA
+                                                          (only set for rows pass 3 looked at)
+                source_attribution_pass2_overridden    -> "TRUE" | "FALSE" | NA ("TRUE" = pass 3
+                                                          disagreed clearly enough to override
+                                                          pass 2's stated answer; "FALSE" = pass 3
+                                                          checked and agreed, or was inconclusive;
+                                                          NA = pass 3 never looked at this row)
 
 Usage
 -----
@@ -97,7 +139,8 @@ Usage
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
       --max_new_tokens 140 --max_input_tokens 16384 \\
-      --verify_batch_size 8 --verify_max_new_tokens 250 --verify_max_input_tokens 16384
+      --verify_batch_size 8 --verify_max_new_tokens 250 --verify_max_input_tokens 16384 \\
+      --coherence_batch_size 32
 """
 from __future__ import annotations
 
@@ -121,6 +164,10 @@ from src.step4a_prompts import (
 )
 from src.step4a_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
+from src.step4a_pass2_coherence_logit_prompts import (
+    build_coherence_prompt, build_coherence_calibration_prompt, letters_for_order,
+)
+from src.step4b_logit_utils import softmax_restricted, average_yes_over_orderings, calibrate
 
 DRAFT_COLS = ["source_attribution_draft", "source_attribution_justification"]
 FINAL_COLS = ["source_attribution"]
@@ -136,7 +183,16 @@ PASS2_COLS = [
     "source_attribution_pass2_justification",
     "source_attribution_pass2_answer",
 ]
-ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS + PASS2_COLS
+# 2026-11-18 "pass2 coherence check" pass 3 -- see
+# src/step4a_pass2_coherence_logit_prompts.py and this file's own module
+# docstring. source_attribution_pass2_answer (above) stays pass 2's own
+# RAW stated answer, untouched by this pass -- the coherence check's
+# verdict lives only in these two columns plus the final source_attribution.
+PASS2_COHERENCE_COLS = [
+    "source_attribution_pass2_coherence_p_sourced",
+    "source_attribution_pass2_overridden",
+]
+ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS + PASS2_COLS + PASS2_COHERENCE_COLS
 
 VERIFY_LABELS = {"SOURCED": "SOURCED", "JOURNALIST": "JOURNALIST"}
 
@@ -211,6 +267,44 @@ def main() -> int:
                     "source_attribution stays exactly pass 1's own (possibly forced) answer for "
                     "every row.")
 
+    # --- Pass 3 ("pass2 coherence check", 2026-11-18, logit-probing): see
+    # this file's own module docstring and
+    # src/step4a_pass2_coherence_logit_prompts.py. Reads ONLY pass 2's own
+    # justification text (short, cheap -- no large max_input_tokens needed
+    # here, unlike pass 1/pass 2 above), one forward pass per order, same
+    # calibrated-logit machinery as step4b/the removed step4a validation
+    # pass. ---
+    ap.add_argument("--coherence_candidate_letters", default="A,B",
+                    help="Comma-separated single-token candidates for Sourced/Journalist in the "
+                         "pass-2 coherence check. Verify these with "
+                         "scripts/check_step4b_logit_tokens.py before relying on them (same "
+                         "tokenizer, same letters already checked for step4b/step3/the removed "
+                         "step4a validation pass).")
+    ap.add_argument("--coherence_batch_size", type=int, default=32)
+    ap.add_argument("--coherence_checkpoint_every", type=int, default=200,
+                    help="Save a checkpoint after every N (row,order) coherence-check prompts resolved.")
+    ap.add_argument("--coherence_threshold", type=float, default=0.5,
+                    help="2026-11-18: decision midpoint for the pass-2 coherence check's "
+                    "calibrated P(pass 2's own justification concludes SOURCED). Combined with "
+                    "--coherence_margin below to decide whether to override pass 2's stated "
+                    "answer -- see that argument's own help text. Starting value is the neutral "
+                    "logit midpoint, NOT yet empirically tuned; this run's p_sourced distribution "
+                    "is the first real data point for tuning it, same convention as every other "
+                    "threshold in this project's history (job20255405 for step3, etc.) -- do not "
+                    "grid-search a 'best' value on this same run's own data (circular).")
+    ap.add_argument("--coherence_margin", type=float, default=0.15,
+                    help="2026-11-18: minimum distance from --coherence_threshold the calibrated "
+                    "p_sourced must reach, in the DISAGREEING direction, before pass 3 overrides "
+                    "pass 2's stated answer -- e.g. pass 2 said SOURCED, but p_sourced_corrected "
+                    "<= threshold-margin: override to JOURNALIST. A read that disagrees only "
+                    "weakly (within the margin), or that fails outright (NaN), leaves pass 2's own "
+                    "answer untouched -- fail-safe, same convention as every other "
+                    "validation/verification pass in this codebase. NOT yet empirically tuned.")
+    ap.add_argument("--skip_coherence", action="store_true",
+                    help="2026-11-18: disable the pass-2 coherence check entirely -- no third LLM "
+                    "call is made, and source_attribution stays exactly pass 2's own (or pass 1's, "
+                    "if pass 2 was skipped/didn't touch the row) answer for every row.")
+
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
     ap.add_argument("--task_id",   type=int, default=None,
@@ -219,6 +313,9 @@ def main() -> int:
                     help="Total number of array tasks. If omitted, read from SLURM_ARRAY_TASK_COUNT.")
 
     args = ap.parse_args()
+    coherence_candidate_letters = [s.strip() for s in args.coherence_candidate_letters.split(",") if s.strip()]
+    if len(coherence_candidate_letters) != 2:
+        raise ValueError(f"--coherence_candidate_letters must give exactly 2 letters, got {coherence_candidate_letters!r}")
 
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
@@ -269,13 +366,21 @@ def main() -> int:
             Path(checkpoint_path).unlink()
             df = df.copy()
             for col in ALL_COLS:
-                df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
+                # source_attribution_pass2_coherence_p_sourced holds a FLOAT
+                # (the calibrated P(sourced)), not a label -- same dtype
+                # issue already hit (and fixed) for the removed validation
+                # pass's own p_sourced column: pandas' strict "string" dtype
+                # raises TypeError on a float assignment. Every other column
+                # here is a label/flag and keeps the "string" dtype.
+                dtype = "object" if col == "source_attribution_pass2_coherence_p_sourced" else "string"
+                df[col] = pd.Series(pd.NA, index=df.index, dtype=dtype)
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
         for col in ALL_COLS:
-            df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
+            dtype = "object" if col == "source_attribution_pass2_coherence_p_sourced" else "string"
+            df[col] = pd.Series(pd.NA, index=df.index, dtype=dtype)
 
     # --- LLM client ---
     client = TransformersClient(
@@ -488,6 +593,175 @@ def main() -> int:
             Path(pass2_checkpoint_path).unlink()
             print(f"[checkpoint] Deleted {pass2_checkpoint_path}")
 
+    # -------------------------------------------------------------------
+    # Pass 3 ("pass2 coherence check", 2026-11-18): see this file's own
+    # module docstring and src/step4a_pass2_coherence_logit_prompts.py for
+    # the full design rationale. Scoped to every row pass 2 produced a
+    # parseable answer for (both flips AND confirms -- self-contradiction
+    # is possible in either direction in principle, even though only the
+    # SOURCED direction was observed on job20620441). Naturally empty if
+    # --skip_pass2 was set or pass 2 touched nothing. Reads ONLY pass 2's
+    # own justification text, never the article.
+    # -------------------------------------------------------------------
+    if args.skip_coherence:
+        print("[coherence] --skip_coherence set -- pass-2 coherence check disabled. Keeping "
+              "pass 2's own (or pass 1's) source_attribution for every row, no third LLM call "
+              "made.", flush=True)
+        n_coh_checked = 0
+        n_coh_overridden = 0
+        n_coh_inconclusive = 0
+    else:
+        coherence_mask = (
+            build_mask(df, text_col=args.text_col)
+            & df["source_attribution_pass2_answer"].notna()
+        )
+        coherence_idx = df.index[coherence_mask].tolist()
+        n_coh_checked = len(coherence_idx)
+        print(f"[coherence] Checking {n_coh_checked:,} rows' pass-2 justification for "
+              f"self-contradiction against pass 2's own stated answer "
+              f"(--coherence_threshold={args.coherence_threshold}, "
+              f"--coherence_margin={args.coherence_margin})...", flush=True)
+
+        if task_id is not None:
+            coherence_checkpoint_path = args.output_base + f"_task{task_id}_pass2coherence_checkpoint.parquet"
+        else:
+            coherence_checkpoint_path = args.output_base + "_pass2coherence_checkpoint.parquet"
+
+        print("[coherence] Computing p0 (this question's own intrinsic sourced-bias) on the "
+              "empty/neutral-input variant...", flush=True)
+        calib_prompts = [build_coherence_calibration_prompt(order) for order in (1, 2)]
+        calib_raw = client.logprob_many(
+            system_prompt="",
+            user_prompts=calib_prompts,
+            candidate_letters=coherence_candidate_letters,
+            max_input_tokens=args.verify_max_input_tokens,
+        )
+        p_sourced_by_order = {}
+        for order, logits_dict in zip((1, 2), calib_raw):
+            probs = softmax_restricted(logits_dict)
+            letter_sourced, _letter_journalist = letters_for_order(order)
+            p_sourced_by_order[order] = probs.get(letter_sourced, float("nan"))
+        p0 = average_yes_over_orderings(p_sourced_by_order[1], p_sourced_by_order[2])
+        print(f"  p0 = {p0:.4f}", flush=True)
+
+        coh_flat_keys = []    # (row_idx, order)
+        coh_flat_prompts = []
+        for row_idx in coherence_idx:
+            row = df.loc[row_idx]
+            for order in (1, 2):
+                coh_flat_keys.append((row_idx, order))
+                coh_flat_prompts.append(build_coherence_prompt(row, order))
+
+        print(f"[coherence] {len(coh_flat_prompts):,} total (row, order) coherence prompts "
+              f"({n_coh_checked:,} rows x 2 orders)", flush=True)
+
+        coh_done = {}  # (row_idx, order) -> {letter: logit}
+        if Path(coherence_checkpoint_path).exists():
+            ckpt = pd.read_parquet(coherence_checkpoint_path)
+            for _, r in ckpt.iterrows():
+                vkey = (int(r["row_idx"]), int(r["order"]))
+                coh_done[vkey] = {letter: r[f"logit_{letter}"] for letter in coherence_candidate_letters}
+            print(f"[resume] Loaded {len(coh_done):,} already-resolved coherence prompts from "
+                  f"{coherence_checkpoint_path}", flush=True)
+
+        coh_todo = [i for i, vkey in enumerate(coh_flat_keys) if vkey not in coh_done]
+        print(f"[coherence] {len(coh_todo):,} coherence prompts remaining "
+              f"({len(coh_flat_prompts) - len(coh_todo):,} already done)", flush=True)
+
+        def _save_coherence_checkpoint():
+            rows = []
+            for (row_idx, order), logits_dict in coh_done.items():
+                r = {"row_idx": row_idx, "order": order}
+                for letter in coherence_candidate_letters:
+                    r[f"logit_{letter}"] = logits_dict.get(letter, float("nan"))
+                rows.append(r)
+            ckpt_df = pd.DataFrame(rows)
+            Path(coherence_checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            ckpt_df.to_parquet(coherence_checkpoint_path, index=False)
+            print(f"[checkpoint] Saved {len(ckpt_df):,} resolved coherence prompts -> "
+                  f"{coherence_checkpoint_path}", flush=True)
+
+        n_since_coh_checkpoint = 0
+        for start in range(0, len(coh_todo), args.coherence_batch_size):
+            batch_flat_idx = coh_todo[start:start + args.coherence_batch_size]
+            batch_prompts = [coh_flat_prompts[i] for i in batch_flat_idx]
+
+            raw = client.logprob_many(
+                system_prompt="",
+                user_prompts=batch_prompts,
+                candidate_letters=coherence_candidate_letters,
+                max_input_tokens=args.verify_max_input_tokens,
+            )
+            for flat_idx, logits_dict in zip(batch_flat_idx, raw):
+                coh_done[coh_flat_keys[flat_idx]] = logits_dict
+
+            n_since_coh_checkpoint += len(batch_flat_idx)
+            n_done_total = len(coh_flat_prompts) - (len(coh_todo) - start - len(batch_flat_idx))
+            print(f"[coherence progress] {n_done_total:,}/{len(coh_flat_prompts):,} prompts "
+                  f"resolved", flush=True)
+
+            if n_since_coh_checkpoint >= args.coherence_checkpoint_every:
+                _save_coherence_checkpoint()
+                n_since_coh_checkpoint = 0
+
+        if coh_todo:
+            _save_coherence_checkpoint()
+
+        n_coh_overridden = 0
+        n_coh_inconclusive = 0
+        for row_idx in coherence_idx:
+            p_sourced_by_order = {}
+            coh_any_nan = False
+            for order in (1, 2):
+                logits_dict = coh_done.get((row_idx, order))
+                if logits_dict is None:
+                    p_sourced_by_order[order] = float("nan")
+                    coh_any_nan = True
+                    continue
+                probs = softmax_restricted(logits_dict)
+                letter_sourced, _letter_journalist = letters_for_order(order)
+                p_sourced_by_order[order] = probs.get(letter_sourced, float("nan"))
+                if pd.isna(p_sourced_by_order[order]):
+                    coh_any_nan = True
+
+            p_sourced = average_yes_over_orderings(p_sourced_by_order[1], p_sourced_by_order[2])
+            if pd.isna(p_sourced) or pd.isna(p0):
+                coh_any_nan = True
+
+            if coh_any_nan:
+                # Inconclusive read -- fail-safe: keep pass 2's own stated
+                # answer, don't override on a signal we don't trust.
+                n_coh_inconclusive += 1
+                df.at[row_idx, "source_attribution_pass2_overridden"] = "FALSE"
+                continue
+
+            p_sourced_corrected = calibrate(p_sourced, p0)
+            df.at[row_idx, "source_attribution_pass2_coherence_p_sourced"] = p_sourced_corrected
+
+            pass2_answer = df.at[row_idx, "source_attribution_pass2_answer"]
+            low = args.coherence_threshold - args.coherence_margin
+            high = args.coherence_threshold + args.coherence_margin
+            overridden = False
+            if pass2_answer == "SOURCED" and p_sourced_corrected <= low:
+                df.at[row_idx, "source_attribution"] = "JOURNALIST"
+                overridden = True
+            elif pass2_answer == "JOURNALIST" and p_sourced_corrected >= high:
+                df.at[row_idx, "source_attribution"] = "SOURCED"
+                overridden = True
+
+            df.at[row_idx, "source_attribution_pass2_overridden"] = "TRUE" if overridden else "FALSE"
+            if overridden:
+                n_coh_overridden += 1
+
+        print(f"[coherence] {n_coh_overridden:,}/{n_coh_checked:,} rows overridden "
+              f"(pass 2's stated answer disagreed clearly with its own justification) "
+              f"({n_coh_inconclusive:,} reads inconclusive, pass 2's answer kept as-is for "
+              f"those)", flush=True)
+
+        if Path(coherence_checkpoint_path).exists():
+            Path(coherence_checkpoint_path).unlink()
+            print(f"[checkpoint] Deleted {coherence_checkpoint_path}")
+
     # --- Save ALL rows ---
     job_id = (
         os.environ.get("SLURM_ARRAY_JOB_ID")
@@ -519,7 +793,9 @@ def main() -> int:
         f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
         f"forced (no real verification): {forced:,} | "
         f"pass2: {n_pass2_flipped:,}/{n_pass2_candidates:,} flipped, "
-        f"{n_pass2_unparsed:,} unparsed)"
+        f"{n_pass2_unparsed:,} unparsed | "
+        f"pass3 coherence: {n_coh_overridden:,}/{n_coh_checked:,} overridden, "
+        f"{n_coh_inconclusive:,} inconclusive)"
     )
 
     if Path(checkpoint_path).exists():

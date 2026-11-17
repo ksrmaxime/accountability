@@ -52,6 +52,23 @@ VERIFY_MAX_INPUT_TOKENS=16384
 VERIFY_TEMPERATURE=0.0
 SKIP_PASS2=${SKIP_PASS2:-0}   # 0 = pass 2 runs (first test of this new mechanism); set SKIP_PASS2=1 to disable without touching code if it measures net-negative.
 
+# Pass 3 ("pass2 coherence check", 2026-11-18, logit-probing) -- reads
+# ONLY pass 2's own justification text (short, cheap), so needs none of
+# pass 1/pass 2's large context budget; reuses VERIFY_MAX_INPUT_TOKENS in
+# the python script purely as a generous ceiling, never actually
+# approached by a short justification. See
+# scripts/step4a_source_attribution.py's module docstring for why this
+# pass exists (job20620441: ~half of pass 2's SOURCED flips were
+# self-contradictory -- reasoning said JOURNALIST, final word said
+# SOURCED anyway -- and deterministic Python rules were tried and found
+# not robust enough to catch it).
+COHERENCE_CANDIDATE_LETTERS=A,B
+COHERENCE_BATCH_SIZE=32
+COHERENCE_CHECKPOINT_EVERY=200
+COHERENCE_THRESHOLD=${COHERENCE_THRESHOLD:-0.5}   # neutral logit midpoint, NOT yet empirically tuned -- see --coherence_threshold's own help text in the python script.
+COHERENCE_MARGIN=${COHERENCE_MARGIN:-0.15}   # minimum confident-disagreement margin before overriding pass 2 -- NOT yet empirically tuned, see --coherence_margin's own help text.
+SKIP_COHERENCE=${SKIP_COHERENCE:-0}   # 0 = pass 3 runs (first test of this new mechanism); set SKIP_COHERENCE=1 to disable without touching code if it measures net-negative.
+
 # Pass 1 retries + last-resort force -- every row step 3 flagged as
 # criticism is now supposed to come out of this step with a real answer
 # (see src/verify_utils.py and the retry/force block in the script).
@@ -94,10 +111,16 @@ echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
 echo "SKIP_PASS2=${SKIP_PASS2}"
+echo "COHERENCE_CANDIDATE_LETTERS=${COHERENCE_CANDIDATE_LETTERS} | COHERENCE_BATCH_SIZE=${COHERENCE_BATCH_SIZE} | COHERENCE_CHECKPOINT_EVERY=${COHERENCE_CHECKPOINT_EVERY} | COHERENCE_THRESHOLD=${COHERENCE_THRESHOLD} | COHERENCE_MARGIN=${COHERENCE_MARGIN} | SKIP_COHERENCE=${SKIP_COHERENCE}"
 
 SKIP_PASS2_FLAG=()
 if [[ "${SKIP_PASS2}" == "1" ]]; then
     SKIP_PASS2_FLAG=(--skip_pass2)
+fi
+
+SKIP_COHERENCE_FLAG=()
+if [[ "${SKIP_COHERENCE}" == "1" ]]; then
+    SKIP_COHERENCE_FLAG=(--skip_coherence)
 fi
 
 python scripts/step4a_source_attribution.py \
@@ -119,8 +142,14 @@ python scripts/step4a_source_attribution.py \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
   --draft_max_retries       "$DRAFT_MAX_RETRIES" \
   --retry_temperature       "$RETRY_TEMPERATURE" \
+  --coherence_candidate_letters   "$COHERENCE_CANDIDATE_LETTERS" \
+  --coherence_batch_size          "$COHERENCE_BATCH_SIZE" \
+  --coherence_checkpoint_every    "$COHERENCE_CHECKPOINT_EVERY" \
+  --coherence_threshold           "$COHERENCE_THRESHOLD" \
+  --coherence_margin              "$COHERENCE_MARGIN" \
   --num_tasks         "$NUM_TASKS" \
-  "${SKIP_PASS2_FLAG[@]}"
+  "${SKIP_PASS2_FLAG[@]}" \
+  "${SKIP_COHERENCE_FLAG[@]}"
   # --task_id est lu automatiquement depuis SLURM_ARRAY_TASK_ID
 
 echo "Task ${SLURM_ARRAY_TASK_ID} terminee."
