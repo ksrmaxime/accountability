@@ -15,65 +15,79 @@ never overwrites it, and `source_attribution` stays NA for those rows.
 Two-pass design (added after the justification-first run showed the label
 sometimes contradicting its own justification — see src/verify_utils.py).
 
-2026-10-13: pass 2 removed. A draft-vs-final comparison on job65746412
-(800-row gold) found pass 2 purely harmful for this step: of the 7 rows it
-touched where pass 1 was already correct, all 7 were flipped to a WRONG
-final answer (0 corrections) -- draft accuracy 72.2% vs final 66.9% on
-that run. The mechanism: VERIFY_USER_TEMPLATE's SOURCED rule ("if the
-explanation names... any specific actor... even briefly") fires whenever
-pass 1's justification names the journalist by name (e.g. "attributed to
-the journalist, Larissa Rhyn"), which it does as a matter of routine
-style -- pass 2, never seeing the article, cannot tell that this named
-actor IS the journalist the SOURCED/JOURNALIST distinction exists to
-exclude. This is the same 2026-10-07/10-12 "bare named actor counts"
-clarification (see VERIFY_USER_TEMPLATE's own changelog in
-src/step4a_prompts.py) having overshot in the opposite direction. Pass 1's
-own draft label is now written straight to the final column below, with
-no second LLM call:
+2026-10-13: pass 2 removed (that version of it). A draft-vs-final
+comparison on job65746412 (800-row gold) found it purely harmful: of the
+7 rows it touched where pass 1 was already correct, all 7 were flipped to
+a WRONG final answer (0 corrections) -- draft accuracy 72.2% vs final
+66.9% on that run. The mechanism: that pass 2 read only pass 1's own
+justification and fired its SOURCED rule whenever that text named the
+journalist by name -- see VERIFY_USER_TEMPLATE's own changelog in
+src/step4a_prompts.py. Pass 1's own draft label was written straight to
+the final column, with no second LLM call, from 2026-10-13 until the
+2026-11-17 redesign below.
 
-  Pass 1 (draft)  — reads the article, names who (if anyone) is making the
-    criticism, then a first-guess SOURCED/JOURNALIST label right after it.
-    Both are kept: the justification under `source_attribution_justification`,
-    the first-guess label under `source_attribution_draft`.
-    `source_attribution_draft` is then copied straight to
-    `source_attribution` (see the end of main(), just before Save).
-  Pass 2 (verify) — no longer called. VERIFY_SYSTEM_PROMPT/build_verify_prompt
-    and the --verify_* CLI args below are kept, unused, in case pass 2 is
-    revisited later.
+2026-11-16 "validate-on-justification" addition (REMOVED 2026-11-17, see
+below): job20479169 (800-row gold, the then-current best step3 lineage)
+showed step4a's 95 YES-gated rows scoring BELOW their own majority-class
+baseline (74.7% vs 82.1%), with a heavily directional error pattern -- 20
+FN (gold=SOURCED, Apertus=JOURNALIST) vs only 4 FP. A separate calibrated-
+logit validation pass (src/step4a_logit_prompts.py) was added to re-check
+pass 1's JOURNALIST verdicts, mirroring step3's own validation pass.
+Tested in BOTH of its configured modes on real runs: reading only pass 1's
+justification (job20588894) found essentially no separation between true
+SOURCED and true JOURNALIST (mean p_sourced 0.375 vs 0.363); reading the
+full article a second time (job20606446) found no real separation either
+(0.506 vs 0.552, if anything inverted) while actively making precision
+worse (FP 4->16 for only 10 FN fixed, net accuracy DROPPING 75.8%->73.7%).
+Diagnosis (see src/step4a_prompts.py's own changelog for the full
+reasoning): a single calibrated logit read, with no generated reasoning,
+cannot force the genuine re-search through a long article that these
+missed cases actually need -- a read of GOLD's own justification for the
+FN rows showed the missed outside voice is usually an explicitly NAMED
+actor (a politician, a court, an interest group) that pass 1's
+justification simply never mentions having looked for. REMOVED entirely
+in favour of the generation-based redesign immediately below -- see
+src/step4a_logit_prompts.py's own module docstring for the full record of
+this negative result (kept there for reference, no longer imported here).
 
-2026-11-16 "validate-on-justification" addition: job20479169 (800-row
-gold, the current best step3 lineage) showed step4a's 95 YES-gated rows
-scoring BELOW their own majority-class baseline (74.7% vs 82.1%), with a
-heavily directional error pattern -- 20 FN (gold=SOURCED, Apertus=
-JOURNALIST) vs only 4 FP. This adds a SEPARATE validation pass -- see
-src/step4a_logit_prompts.py's module docstring for the full design
-rationale. It is deliberately the MIRROR of step3's own validation pass,
-not a copy: scoped ONLY to rows pass 1 said JOURNALIST (never SOURCED),
-and can only ever flip JOURNALIST->SOURCED, the opposite direction from
-step3's YES->NO-only pass, because step4a's own error profile is FN-heavy
-rather than FP-heavy. Uses the same calibrated-logit machinery (one
-forward pass, order-swap, context-free calibration) as step3/step4b.
-Forced rows (source_attribution_forced == "TRUE") skip this pass
-entirely, same convention as step3. Toggle with --skip_validation (see
-sbatch_step4a_array.sh's SKIP_VALIDATION).
+2026-11-17 pass 2 redesign ("forced re-search", ARTICLE-grounded): adds
+back a pass 2, but a GENERATION pass (reasoning allowed, like pass 1 is),
+not the logit-probing of the version just removed above, and reads the
+FULL ORIGINAL ARTICLE again -- not pass 1's own justification, which was
+the fatal blind spot of the 2026-10-13-removed pass 2 (it could not tell
+a named journalist byline from a real outside source, because it never
+saw the article to check). The actual fix for the diagnosed retrieval
+failure is VERIFY_USER_TEMPLATE's explicit instruction (src/step4a_prompts.py)
+to enumerate every named actor mentioned near the criticism before
+answering -- forcing the same kind of deliberate search pass 1's own
+justification-before-answer design relies on, but specifically re-
+triggered on rows pass 1 already got wrong once. Scoped ONLY to rows pass
+1 said JOURNALIST (the same MIRROR-of-step3 scoping the removed
+validation pass used, for the same reason: the measured error is one-
+directional, FN-heavy, so this pass can only ever flip JOURNALIST->SOURCED,
+never the reverse -- it cannot create a new error on a row pass 1 already
+got right as SOURCED). Forced rows (source_attribution_forced == "TRUE")
+skip pass 2 entirely, same convention as the removed validation pass --
+there was no real pass 1 for those, nothing to re-check. Deliberately NO
+retry on a pass-2 parse failure (unlike pass 1's own retry ladder): the
+fail-safe default is to keep pass 1's JOURNALIST either way, the affected
+population is small (~60-95/800 rows), and the goal here is a scoped,
+simple fix to test, not another retry ladder. Toggle with --skip_pass2
+(see sbatch_step4a_array.sh's SKIP_PASS2). Not yet confirmed on a real run.
 
-Output columns: source_attribution                 -> "SOURCED" | "JOURNALIST" | NA  (FINAL --
-                                                        possibly flipped to SOURCED by the
-                                                        validation pass)
-                source_attribution_draft            -> "SOURCED" | "JOURNALIST" | NA  (pass 1)
-                source_attribution_justification    -> free text | NA                 (pass 1)
-                source_attribution_before_validation -> "JOURNALIST" | NA  (pass 1's own verdict,
-                                                        before the validation pass touched it --
-                                                        only set for rows the validation pass
-                                                        actually looked at)
-                source_attribution_validation_p_sourced -> calibrated P(an outside voice IS
-                                                        credited, i.e. SOURCED is correct), or NA
-                source_attribution_validated        -> "TRUE" | "FALSE" | NA ("TRUE" = pass 1's
-                                                        JOURNALIST confirmed/kept, "FALSE" =
-                                                        rejected and flipped to SOURCED; NA = not
-                                                        eligible, or an inconclusive read --
-                                                        fail-safe: pass 1's JOURNALIST is kept
-                                                        either way)
+Output columns: source_attribution                   -> "SOURCED" | "JOURNALIST" | NA  (FINAL --
+                                                          possibly flipped to SOURCED by pass 2)
+                source_attribution_draft              -> "SOURCED" | "JOURNALIST" | NA  (pass 1)
+                source_attribution_justification      -> free text | NA                 (pass 1)
+                source_attribution_before_pass2        -> "JOURNALIST" | NA  (pass 1's own verdict,
+                                                          before pass 2 touched it -- only set for
+                                                          rows pass 2 actually looked at)
+                source_attribution_pass2_justification -> free text | NA (pass 2's own re-search,
+                                                          only set for rows pass 2 looked at)
+                source_attribution_pass2_answer        -> "SOURCED" | "JOURNALIST" | NA (pass 2's
+                                                          own verdict; NA = pass 2 ran but its
+                                                          output didn't parse -- pass 1's
+                                                          JOURNALIST is kept either way)
 
 Usage
 -----
@@ -82,8 +96,8 @@ Usage
       --output_base data/output/step4a \\
       --model_path  /reference/LLM/swiss-ai/Apertus-8B-Instruct-2509 \\
       --dtype bf16 --batch_size 4 --temperature 0.0 \\
-      --max_new_tokens 80 --max_input_tokens 16384 \\
-      --verify_batch_size 16 --verify_max_new_tokens 8 --verify_max_input_tokens 512
+      --max_new_tokens 140 --max_input_tokens 16384 \\
+      --verify_batch_size 8 --verify_max_new_tokens 250 --verify_max_input_tokens 16384
 """
 from __future__ import annotations
 
@@ -107,12 +121,6 @@ from src.step4a_prompts import (
 )
 from src.step4a_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
-from src.step4a_logit_prompts import (
-    build_validation_prompt, build_validation_calibration_prompt,
-    build_validation_prompt_from_justification, build_validation_calibration_prompt_from_justification,
-    letters_for_order,
-)
-from src.step4b_logit_utils import softmax_restricted, average_yes_over_orderings, calibrate
 
 DRAFT_COLS = ["source_attribution_draft", "source_attribution_justification"]
 FINAL_COLS = ["source_attribution"]
@@ -120,14 +128,15 @@ FINAL_COLS = ["source_attribution"]
 # forced one-word pass rather than a genuine two-pass verification -- see
 # the retry/force block in main(). NA for every normally-answered row.
 FLAG_COLS = ["source_attribution_forced"]
-# 2026-11-16 "validate-on-justification" pass -- see src/step4a_logit_prompts.py
-# and this file's own module docstring.
-VALIDATION_COLS = [
-    "source_attribution_before_validation",
-    "source_attribution_validation_p_sourced",
-    "source_attribution_validated",
+# 2026-11-17 "forced re-search" pass 2 -- see src/step4a_prompts.py's
+# VERIFY_SYSTEM_PROMPT/build_verify_prompt and this file's own module
+# docstring.
+PASS2_COLS = [
+    "source_attribution_before_pass2",
+    "source_attribution_pass2_justification",
+    "source_attribution_pass2_answer",
 ]
-ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS + VALIDATION_COLS
+ALL_COLS = DRAFT_COLS + FINAL_COLS + FLAG_COLS + PASS2_COLS
 
 VERIFY_LABELS = {"SOURCED": "SOURCED", "JOURNALIST": "JOURNALIST"}
 
@@ -142,8 +151,15 @@ def parse_draft_output(raw: str) -> dict:
     return {"source_attribution_draft": label, "source_attribution_justification": justification}
 
 
-def parse_verify_output(raw: str) -> dict:
-    return {"source_attribution": parse_label_only(raw, VERIFY_LABELS)}
+def parse_pass2_output(raw: str) -> dict:
+    """Same justification-before-answer parsing as pass 1 (src/verify_utils.py) --
+    a bare label with no reasoning is a parse failure, not a partial success,
+    so a lazy one-word reflex can't silently pass as a genuine re-search."""
+    empty = {"source_attribution_pass2_justification": pd.NA, "source_attribution_pass2_answer": pd.NA}
+    label, justification = parse_draft_labeled(raw, VERIFY_LABELS)
+    if label is None:
+        return empty
+    return {"source_attribution_pass2_justification": justification, "source_attribution_pass2_answer": label}
 
 
 def main() -> int:
@@ -180,52 +196,20 @@ def main() -> int:
     ap.add_argument("--retry_temperature",   type=float, default=0.4,
                     help="Temperature for the first retry attempt; raised by +0.2 per further attempt, capped at 0.9.")
 
-    # --- Inference: pass 2 (verify, reads only the justification) ---
-    ap.add_argument("--verify_batch_size",       type=int,   default=16)
+    # --- Inference: pass 2 ("forced re-search", 2026-11-17 redesign --
+    # reads the FULL ARTICLE again, not just pass 1's justification, see
+    # this file's own module docstring). Needs a much larger input budget
+    # than the old justification-only pass 2 did (raised from 512 to
+    # 16384 to fit the article) and a larger output budget (raised from 8
+    # to 250, for the enumerate-then-answer reasoning). ---
+    ap.add_argument("--verify_batch_size",       type=int,   default=8)
     ap.add_argument("--verify_temperature",      type=float, default=0.0)
-    ap.add_argument("--verify_max_new_tokens",   type=int,   default=8)
-    ap.add_argument("--verify_max_input_tokens", type=int,   default=512)
-
-    # --- Validation pass (2026-11-16 "validate-on-justification", logit-
-    # probing): no temperature/max_new_tokens -- a single forward pass
-    # reads next-token logits, nothing is sampled. batch_size counts
-    # individual (row, order) PROMPTS, not rows -- each validated row
-    # produces 2 prompts (order-swap). Reuses --max_input_tokens from
-    # pass 1 above (same article text, same truncation budget needed, in
-    # case --validation_input=article is used). ---
-    ap.add_argument("--candidate_letters", default="A,B",
-                    help="Comma-separated single-token candidates for Sourced/Journalist in the "
-                         "validation pass. Verify these with scripts/check_step4b_logit_tokens.py "
-                         "before relying on them (same tokenizer, same letters already checked "
-                         "for step4b/step3).")
-    ap.add_argument("--validation_batch_size", type=int, default=32)
-    ap.add_argument("--validation_checkpoint_every", type=int, default=200,
-                    help="Save a checkpoint after every N (row,order) validation prompts resolved.")
-    ap.add_argument("--validation_input", default="justification", choices=["article", "justification"],
-                    help="2026-11-16: what the validation pass re-checks pass 1's JOURNALIST "
-                    "verdict against. 'justification' (DEFAULT) reads only pass 1's own "
-                    "source_attribution_justification -- by analogy with step3's own finding that "
-                    "re-reading the full article a second time measured net-negative there (see "
-                    "src/step3_logit_prompts.py). This is a PRIOR, not yet independently "
-                    "confirmed for step4a -- the first run with this default is that check. "
-                    "'article' re-reads the full raw article instead, kept available precisely to "
-                    "test that prior if justification-mode underperforms here.")
-    ap.add_argument("--validation_threshold", type=float, default=0.5,
-                    help="2026-11-16: decision cutoff on source_attribution_validation_p_sourced "
-                    "-- p_sourced >= threshold flips pass 1's JOURNALIST to SOURCED, otherwise "
-                    "JOURNALIST is kept. Starting value is the neutral logit midpoint (0.5), NOT "
-                    "yet empirically tuned -- step3's own threshold-tuning history "
-                    "(src/step3_criticism_detection.py) showed the natural midpoint can be "
-                    "miscalibrated for a specific validation question, so treat this run's "
-                    "p_sourced distribution (gold-SOURCED vs gold-JOURNALIST means) as the first "
-                    "real data point for tuning this, the same way job20255405 was for step3 -- "
-                    "do not grid-search a 'best' threshold on this same run's own data (circular); "
-                    "pick a round value motivated by this run and confirm out-of-sample on the "
-                    "next one.")
-    ap.add_argument("--skip_validation", action="store_true",
-                    help="2026-11-16: disable the validation pass entirely -- no validation "
-                    "forward passes are run, and source_attribution stays exactly pass 1's own "
-                    "(possibly forced) answer for every row.")
+    ap.add_argument("--verify_max_new_tokens",   type=int,   default=250)
+    ap.add_argument("--verify_max_input_tokens", type=int,   default=16384)
+    ap.add_argument("--skip_pass2", action="store_true",
+                    help="2026-11-17: disable pass 2 entirely -- no second LLM call is made, and "
+                    "source_attribution stays exactly pass 1's own (possibly forced) answer for "
+                    "every row.")
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -235,9 +219,6 @@ def main() -> int:
                     help="Total number of array tasks. If omitted, read from SLURM_ARRAY_TASK_COUNT.")
 
     args = ap.parse_args()
-    candidate_letters = [s.strip() for s in args.candidate_letters.split(",") if s.strip()]
-    if len(candidate_letters) != 2:
-        raise ValueError(f"--candidate_letters must give exactly 2 letters, got {candidate_letters!r}")
 
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
@@ -288,22 +269,13 @@ def main() -> int:
             Path(checkpoint_path).unlink()
             df = df.copy()
             for col in ALL_COLS:
-                # source_attribution_validation_p_sourced holds a FLOAT
-                # (the calibrated P(sourced)), not a label -- same dtype
-                # issue already fixed for step3's own p_true column (see
-                # src/step3_criticism_detection.py's 2026-11-05 entry):
-                # pandas' strict "string" dtype raises TypeError on a
-                # float assignment. Every other column here is a
-                # label/flag and keeps the "string" dtype.
-                dtype = "object" if col == "source_attribution_validation_p_sourced" else "string"
-                df[col] = pd.Series(pd.NA, index=df.index, dtype=dtype)
+                df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
         else:
             print(f"[resume] Loading checkpoint: {checkpoint_path}", flush=True)
             df = ckpt
     else:
         for col in ALL_COLS:
-            dtype = "object" if col == "source_attribution_validation_p_sourced" else "string"
-            df[col] = pd.Series(pd.NA, index=df.index, dtype=dtype)
+            df[col] = pd.Series(pd.NA, index=df.index, dtype="string")
 
     # --- LLM client ---
     client = TransformersClient(
@@ -434,193 +406,87 @@ def main() -> int:
             flush=True,
         )
 
-    # --- Pass 2 removed (2026-10-13): see the docstring above for the full
-    # evidence (job65746412: draft accuracy 72.2% vs final 66.9%, 7/7
-    # pass-1-correct flips turned wrong, 0 corrected). Pass 1's own draft
-    # label is now the final answer: no further LLM call.
-    # `source_attribution_forced` rows already have `source_attribution` set
-    # from the force pass above and are left untouched by this fill.
+    # Pass 1's own draft label is the final answer until/unless pass 2
+    # (below) flips a JOURNALIST row to SOURCED. `source_attribution_forced`
+    # rows already have `source_attribution` set from the force pass above
+    # and are left untouched by this fill.
     df["source_attribution"] = df["source_attribution"].where(
         df["source_attribution"].notna(), df["source_attribution_draft"]
     )
 
     # -------------------------------------------------------------------
-    # Validation pass (2026-11-16 "validate-on-justification", logit-
-    # probing): see this file's own module docstring and
-    # src/step4a_logit_prompts.py for the full design rationale. Scoped
-    # ONLY to rows pass 1 said JOURNALIST (the MIRROR of step3's own
-    # YES-only scoping -- step4a's error is FN-heavy, not FP-heavy),
-    # excluding forced rows (a forced row never went through a real
-    # pass 1 either, there is nothing to validate). Re-reads
-    # source_attribution_justification by default (--validation_input).
+    # Pass 2 ("forced re-search", 2026-11-17): see this file's own module
+    # docstring and src/step4a_prompts.py's VERIFY_SYSTEM_PROMPT/
+    # build_verify_prompt for the full design rationale. Scoped ONLY to
+    # rows pass 1 said JOURNALIST (the error this pass targets is FN-
+    # heavy, not FP-heavy, so it can only ever flip JOURNALIST->SOURCED),
+    # excluding forced rows (a forced row never went through a real pass 1
+    # either, there is nothing to re-check). Re-reads the full article.
     # -------------------------------------------------------------------
-    if args.skip_validation:
-        print("[validation] --skip_validation set -- validation pass disabled. Keeping pass "
-              "1's own (possibly forced) source_attribution for every row, no validation forward "
-              "passes run.", flush=True)
-        n_val_flipped = 0
-        n_val_incomplete = 0
-        n_val_candidates = 0
+    if args.skip_pass2:
+        print("[pass2] --skip_pass2 set -- pass 2 disabled. Keeping pass 1's own (possibly "
+              "forced) source_attribution for every row, no second LLM call made.", flush=True)
+        n_pass2_flipped = 0
+        n_pass2_unparsed = 0
+        n_pass2_candidates = 0
     else:
-        # Same .fillna(True) convention as step3 (src/step3_criticism_detection.py's
-        # 2026-11-05 fix): a pyarrow-backed "string" NA on source_attribution_forced
-        # must read as "not forced", not propagate to NA (which a boolean
-        # mask silently treats as False, excluding every non-forced row).
+        # Same .fillna(True) convention as step3/the removed validation pass:
+        # a pyarrow-backed "string" NA on source_attribution_forced must read
+        # as "not forced", not propagate to NA (which a boolean mask silently
+        # treats as False, excluding every non-forced row).
         not_forced = (df["source_attribution_forced"] != "TRUE").fillna(True)
-        validation_mask = (
+        pass2_mask = (
             build_mask(df, text_col=args.text_col)
             & (df["source_attribution"] == "JOURNALIST")
             & not_forced
         )
-        if args.validation_input == "justification":
-            validation_mask = validation_mask & df["source_attribution_justification"].notna()
-        validated_idx = df.index[validation_mask].tolist()
-        n_val_candidates = len(validated_idx)
-        val_input_desc = (
-            "pass 1's own justification" if args.validation_input == "justification"
-            else "the full article"
-        )
-        print(f"[validation] Re-checking pass 1's JOURNALIST verdict for {n_val_candidates:,} rows "
-              f"against {val_input_desc} (--validation_input={args.validation_input}, "
-              f"--validation_threshold={args.validation_threshold})...", flush=True)
+        n_pass2_candidates = int(pass2_mask.sum())
+        print(f"[pass2] Re-checking pass 1's JOURNALIST verdict for {n_pass2_candidates:,} rows "
+              f"against the full article...", flush=True)
+
+        df.loc[pass2_mask, "source_attribution_before_pass2"] = "JOURNALIST"
 
         if task_id is not None:
-            validation_checkpoint_path = args.output_base + f"_task{task_id}_step4aval_checkpoint.parquet"
+            pass2_checkpoint_path = args.output_base + f"_task{task_id}_pass2_checkpoint.parquet"
         else:
-            validation_checkpoint_path = args.output_base + "_step4aval_checkpoint.parquet"
+            pass2_checkpoint_path = args.output_base + "_pass2_checkpoint.parquet"
 
-        print("[validation] Computing p0 (this question's own intrinsic sourced-bias) on the "
-              "empty/neutral-input variant...", flush=True)
-        if args.validation_input == "justification":
-            calib_prompts = [build_validation_calibration_prompt_from_justification(order) for order in (1, 2)]
-        else:
-            calib_prompts = [build_validation_calibration_prompt(order) for order in (1, 2)]
-        calib_raw = client.logprob_many(
-            system_prompt="",
-            user_prompts=calib_prompts,
-            candidate_letters=candidate_letters,
-            max_input_tokens=args.max_input_tokens,
+        pass2_cfg = RunConfig(
+            id_col="__index__",
+            text_col=args.text_col,
+            batch_size=args.verify_batch_size,
+            temperature=args.verify_temperature,
+            max_new_tokens=args.verify_max_new_tokens,
+            max_input_tokens=args.verify_max_input_tokens,
         )
-        p_sourced_by_order = {}
-        for order, logits_dict in zip((1, 2), calib_raw):
-            probs = softmax_restricted(logits_dict)
-            letter_sourced, _letter_journalist = letters_for_order(order)
-            p_sourced_by_order[order] = probs.get(letter_sourced, float("nan"))
-        p0 = average_yes_over_orderings(p_sourced_by_order[1], p_sourced_by_order[2])
-        print(f"  p0 = {p0:.4f}", flush=True)
+        df = run_llm_dataframe(
+            df=df,
+            cfg=pass2_cfg,
+            client=client,
+            system_prompt=VERIFY_SYSTEM_PROMPT,
+            select_mask_fn=lambda df_, _m=pass2_mask: _m,
+            build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
+            parse_fn=parse_pass2_output,
+            output_cols=PASS2_COLS,
+            skip_if_already_filled="source_attribution_pass2_answer",
+            checkpoint_path=pass2_checkpoint_path,
+            checkpoint_every=50,
+        )
 
-        val_flat_keys = []    # (row_idx, order)
-        val_flat_prompts = []
-        for row_idx in validated_idx:
-            row = df.loc[row_idx]
-            for order in (1, 2):
-                val_flat_keys.append((row_idx, order))
-                if args.validation_input == "justification":
-                    val_flat_prompts.append(build_validation_prompt_from_justification(row, order))
-                else:
-                    val_flat_prompts.append(build_validation_prompt(row, args.text_col, order))
+        flip_mask = pass2_mask & (df["source_attribution_pass2_answer"] == "SOURCED")
+        n_pass2_flipped = int(flip_mask.sum())
+        df.loc[flip_mask, "source_attribution"] = "SOURCED"
 
-        print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
-              f"({n_val_candidates:,} rows x 2 orders)", flush=True)
+        unparsed_mask = pass2_mask & df["source_attribution_pass2_answer"].isna()
+        n_pass2_unparsed = int(unparsed_mask.sum())
 
-        val_done = {}  # (row_idx, order) -> {letter: logit}
-        if Path(validation_checkpoint_path).exists():
-            ckpt = pd.read_parquet(validation_checkpoint_path)
-            for _, r in ckpt.iterrows():
-                vkey = (int(r["row_idx"]), int(r["order"]))
-                val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
-            print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
-                  f"{validation_checkpoint_path}", flush=True)
+        print(f"[pass2] {n_pass2_flipped:,}/{n_pass2_candidates:,} rows flipped "
+              f"(JOURNALIST->SOURCED) ({n_pass2_unparsed:,} pass-2 reads didn't parse, pass 1's "
+              f"JOURNALIST kept as-is for those -- no retry)", flush=True)
 
-        val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
-        print(f"[validation] {len(val_todo):,} validation prompts remaining "
-              f"({len(val_flat_prompts) - len(val_todo):,} already done)", flush=True)
-
-        def _save_val_checkpoint():
-            rows = []
-            for (row_idx, order), logits_dict in val_done.items():
-                r = {"row_idx": row_idx, "order": order}
-                for letter in candidate_letters:
-                    r[f"logit_{letter}"] = logits_dict.get(letter, float("nan"))
-                rows.append(r)
-            ckpt_df = pd.DataFrame(rows)
-            Path(validation_checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
-            ckpt_df.to_parquet(validation_checkpoint_path, index=False)
-            print(f"[checkpoint] Saved {len(ckpt_df):,} resolved validation prompts -> "
-                  f"{validation_checkpoint_path}", flush=True)
-
-        n_since_val_checkpoint = 0
-        for start in range(0, len(val_todo), args.validation_batch_size):
-            batch_flat_idx = val_todo[start:start + args.validation_batch_size]
-            batch_prompts = [val_flat_prompts[i] for i in batch_flat_idx]
-
-            raw = client.logprob_many(
-                system_prompt="",
-                user_prompts=batch_prompts,
-                candidate_letters=candidate_letters,
-                max_input_tokens=args.max_input_tokens,
-            )
-            for flat_idx, logits_dict in zip(batch_flat_idx, raw):
-                val_done[val_flat_keys[flat_idx]] = logits_dict
-
-            n_since_val_checkpoint += len(batch_flat_idx)
-            n_done_total = len(val_flat_prompts) - (len(val_todo) - start - len(batch_flat_idx))
-            print(f"[validation progress] {n_done_total:,}/{len(val_flat_prompts):,} prompts "
-                  f"resolved", flush=True)
-
-            if n_since_val_checkpoint >= args.validation_checkpoint_every:
-                _save_val_checkpoint()
-                n_since_val_checkpoint = 0
-
-        if val_todo:
-            _save_val_checkpoint()
-
-        n_val_flipped = 0
-        n_val_incomplete = 0
-        for row_idx in validated_idx:
-            df.at[row_idx, "source_attribution_before_validation"] = "JOURNALIST"
-
-            p_sourced_by_order = {}
-            val_any_nan = False
-            for order in (1, 2):
-                logits_dict = val_done.get((row_idx, order))
-                if logits_dict is None:
-                    p_sourced_by_order[order] = float("nan")
-                    val_any_nan = True
-                    continue
-                probs = softmax_restricted(logits_dict)
-                letter_sourced, _letter_journalist = letters_for_order(order)
-                p_sourced_by_order[order] = probs.get(letter_sourced, float("nan"))
-                if pd.isna(p_sourced_by_order[order]):
-                    val_any_nan = True
-
-            p_sourced = average_yes_over_orderings(p_sourced_by_order[1], p_sourced_by_order[2])
-            if pd.isna(p_sourced) or pd.isna(p0):
-                val_any_nan = True
-
-            if val_any_nan:
-                # Inconclusive read -- fail-safe: keep pass 1's own
-                # JOURNALIST, don't flip on a signal we don't trust.
-                n_val_incomplete += 1
-                continue
-
-            p_sourced_corrected = calibrate(p_sourced, p0)
-            df.at[row_idx, "source_attribution_validation_p_sourced"] = p_sourced_corrected
-
-            if p_sourced_corrected >= args.validation_threshold:
-                df.at[row_idx, "source_attribution_validated"] = "FALSE"
-                df.at[row_idx, "source_attribution"] = "SOURCED"
-                n_val_flipped += 1
-            else:
-                df.at[row_idx, "source_attribution_validated"] = "TRUE"
-
-        print(f"[validation] {n_val_flipped:,}/{n_val_candidates:,} rows flipped "
-              f"(JOURNALIST->SOURCED) ({n_val_incomplete:,} validation reads inconclusive, pass "
-              f"1's JOURNALIST kept as-is for those)", flush=True)
-
-        if Path(validation_checkpoint_path).exists():
-            Path(validation_checkpoint_path).unlink()
-            print(f"[checkpoint] Deleted {validation_checkpoint_path}")
+        if Path(pass2_checkpoint_path).exists():
+            Path(pass2_checkpoint_path).unlink()
+            print(f"[checkpoint] Deleted {pass2_checkpoint_path}")
 
     # --- Save ALL rows ---
     job_id = (
@@ -652,8 +518,8 @@ def main() -> int:
         f"(source_attribution: {sourced:,} SOURCED / {journalist:,} JOURNALIST / {na_count:,} NA | "
         f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
         f"forced (no real verification): {forced:,} | "
-        f"validation: {n_val_flipped:,}/{n_val_candidates:,} flipped, "
-        f"{n_val_incomplete:,} inconclusive)"
+        f"pass2: {n_pass2_flipped:,}/{n_pass2_candidates:,} flipped, "
+        f"{n_pass2_unparsed:,} unparsed)"
     )
 
     if Path(checkpoint_path).exists():

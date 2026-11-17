@@ -68,6 +68,43 @@ available precisely to test that).
 
 Toggle via --validation_input, --validation_threshold,
 --skip_validation -- see scripts/step4a_source_attribution.py.
+
+2026-11-16/17 RESULT -- NEGATIVE, mechanism REMOVED from
+scripts/step4a_source_attribution.py (this file is kept only as a record;
+no longer imported anywhere). Both configured --validation_input modes
+were run on real data and neither produced a usable discriminative
+signal:
+
+  justification mode (job20588894, the default above): mean calibrated
+  p_sourced was 0.375 for gold-SOURCED rows vs 0.363 for gold-JOURNALIST
+  rows -- essentially no separation, fully interleaved distribution, the
+  best-in-sample threshold only reached 62.5% accuracy on this one run's
+  own data (not even a genuine out-of-sample estimate). No net change to
+  the confusion matrix: the same rows right/wrong before and after.
+
+  article mode (job20606446, --validation_input=article): mean p_sourced
+  was 0.506 for gold-SOURCED vs 0.552 for gold-JOURNALIST -- if anything
+  INVERTED, not just noisy -- and, unlike justification mode, this one was
+  actively harmful: it flipped 42/59 JOURNALIST rows to SOURCED, creating
+  12 new false positives (FP 4->16) for only 10 FN fixed (19->9), a net
+  accuracy DROP from 75.8% to 73.7%. Given this project's explicit
+  precision-over-recall preference, this result alone would have been
+  reason enough to disable the mechanism even before the justification-
+  mode result above.
+
+  Diagnosis (see src/step4a_prompts.py's 2026-11-16/17 changelog entry for
+  the full reasoning): a single calibrated LOGIT READ -- no generated
+  reasoning step -- cannot force the genuine re-search through a long
+  article that these FN rows actually need. A read of GOLD's own
+  justification for the FN rows found the missed outside voice is usually
+  an explicitly NAMED actor (a politician, a court, an interest group)
+  that pass 1's own justification never mentions having looked for --
+  there is no token position at which "did I find this specific name"
+  gets reflected in next-token logits without the model having already
+  generated that search as text. A free-text GENERATION pass 2, forcing
+  an enumerate-before-answer step, replaced this mechanism on 2026-11-17 --
+  see scripts/step4a_source_attribution.py's module docstring and
+  src/step4a_prompts.py's VERIFY_SYSTEM_PROMPT/build_verify_prompt.
 """
 from __future__ import annotations
 import pandas as pd

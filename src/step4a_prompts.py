@@ -41,8 +41,24 @@ bottleneck. This needs a larger verify token budget than the previous
 bare one-word answer; VERIFY_MAX_NEW_TOKENS was raised from 8 to 40 in
 sbatch_step4a_array.sh accordingly.
 
+2026-10-13: pass 2 removed (that version of it). A draft-vs-final
+comparison on job65746412 (800-row gold) found pass 2 purely harmful for
+this step: of the 7 rows it touched where pass 1 was already correct, all
+7 were flipped to a WRONG final answer (0 corrections) -- draft accuracy
+72.2% vs final 66.9% on that run. The mechanism: VERIFY_USER_TEMPLATE's
+SOURCED rule ("if the explanation names... any specific actor... even
+briefly") fires whenever pass 1's justification names the journalist by
+name (e.g. "attributed to the journalist, Larissa Rhyn"), which it does
+as a matter of routine style -- pass 2, never seeing the article, cannot
+tell that this named actor IS the journalist the SOURCED/JOURNALIST
+distinction exists to exclude. This is the same 2026-10-07/10-12 "bare
+named actor counts" clarification having overshot in the opposite
+direction. Pass 1's own draft label was written straight to the final
+column (see scripts/step4a_source_attribution.py), with VERIFY_SYSTEM_PROMPT/
+build_verify_prompt kept, unused, below -- until the 2026-11-17 redesign.
+
 2026-10-14 update: a draft-vs-gold breakdown on job65774182 (800-row run,
-pass 2 now removed for this step -- see scripts/step4a_source_attribution.py)
+pass 2 removed for this step -- see scripts/step4a_source_attribution.py)
 found 13 FP (gold=JOURNALIST, Apertus=SOURCED) on the 130-row step3-TP
 population, of which 12 fall into two sub-patterns absent from any prior
 fix: a named political party/canton/coalition treated as a qualifying actor
@@ -124,6 +140,60 @@ outside voice; vague/anonymous attribution markers and reader comments
 count too) are still believed correct -- they just can't be added as more
 prose to an already-dense prompt for this model. If revisited, try
 shortening/cutting existing content to make room rather than appending.
+
+2026-11-16/17: job20479169/job20588894's 95-row gold comparison (current
+best step3 lineage) confirmed the SAME imbalance persists even after all
+the rounds above: 19 FN (gold=SOURCED, Apertus=JOURNALIST) vs only 4 FP,
+accuracy 74.7%, below the 82.1% majority baseline. A read of GOLD's OWN
+justification for all 20 FN rows (not just Apertus's) found that in
+16-17/20 cases the missed outside voice is NOT vague or implicit -- it is
+an explicitly NAMED politician, institution, or interest group (e.g.
+Fabian Molina, the Bundesverwaltungsgericht, the EFK, "die Pharmaindustrie")
+of exactly the kind USER_TEMPLATE's own examples already say should count.
+Apertus's justification for every one of these is the same generic
+templated sentence ("attributed to the article's own narrative framing")
+with no named candidate even considered -- this reads as pass 1 simply
+not FINDING the relevant passage in a long article (an attention/
+retrieval failure), not a disagreement about the definition. Errors also
+cluster heavily on a few recurring, long/dense targets (VBS/DDPS alone:
+5/20). Two first attempts at a SEPARATE validation pass that could only
+flip JOURNALIST->SOURCED (src/step4a_logit_prompts.py, calibrated logit-
+probing, mirroring step3's own validation design) both failed to produce
+a useful signal: reading only pass 1's own justification (job20588894)
+found essentially no separation between true SOURCED and true JOURNALIST
+(mean p_sourced 0.375 vs 0.363); reading the full article a second time
+with the SAME calibrated-logit mechanism (job20606446) still found no
+real separation (0.506 vs 0.552, if anything inverted) while still
+creating 12 new FPs net (FP 4->16) for only 10 FN fixed -- a precision-
+hostile trade given this project's explicit precision-over-recall
+preference. Diagnosis: a single calibrated LOGIT READ (no generated
+reasoning) cannot force the genuine re-search through a long article that
+the missing information requires -- there is no token position at which
+"did I find Fabian Molina's name" gets reflected in next-token logits
+without the model having already generated that reasoning. Hence the
+2026-11-17 pass 2 redesign below: a free-text GENERATION pass (reasoning
+allowed, forced-search instruction), not a logit read, replaces
+src/step4a_logit_prompts.py's mechanism for this step.
+
+2026-11-17 pass 2 redesign ("forced re-search", ARTICLE-grounded): the
+OLD pass 2 (job65746412, reverted 2026-10-13) failed because it read ONLY
+pass 1's own justification and used an unconditional "any named actor
+counts" rule -- it could not tell a named journalist byline from a real
+outside source, because it never saw the article to check. This new pass
+2 fixes BOTH problems at once: it re-reads the FULL ORIGINAL ARTICLE
+(genuine new information, like step3's own validation pass reads the
+article in its own article-mode), keeps the already-tuned byline/target's-
+own-name exclusions from USER_TEMPLATE verbatim, and -- the actual fix for
+the diagnosed retrieval failure -- explicitly instructs the model to
+enumerate every named actor mentioned near the criticism BEFORE answering,
+forcing the same kind of deliberate search pass 1's own justification-
+before-answer design relies on, but now specifically re-triggered on rows
+pass 1 already got wrong once. Scoped ONLY to source_attribution ==
+"JOURNALIST" (mirrors step3's own YES-only / this step's own JOURNALIST-
+only scoping for the exact same reason: the measured error is one-
+directional, FN-heavy, so this pass can only ever flip JOURNALIST->SOURCED,
+never the reverse -- it cannot create a new error on a row pass 1 already
+got right as SOURCED). Not yet confirmed on a real run.
 """
 from __future__ import annotations
 import pandas as pd
@@ -188,37 +258,58 @@ def build_user_prompt(row: pd.Series, text_col: str) -> str:
     return USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
 
 
-# --- Pass 2 (verify): classify the pass-1 justification alone, without the
-# article. See src/verify_utils.py for why this second pass exists. ---
+# --- Pass 2 (verify) -- 2026-11-17 redesign ("forced re-search"). See this
+# file's own module docstring for the full history and rationale. Re-reads
+# the FULL ARTICLE (never just pass 1's justification -- that was the old,
+# reverted design's fatal blind spot), keeps pass 1's own already-tuned
+# exclusions verbatim, and explicitly forces an enumerate-before-answer
+# step to counter the diagnosed retrieval/attention failure. Scoped by the
+# caller (scripts/step4a_source_attribution.py) to source_attribution ==
+# "JOURNALIST" rows only -- this prompt's own wording assumes that. ---
 
 VERIFY_SYSTEM_PROMPT = """\
-You are a media analysis assistant. Another analyst has already read a
-newspaper article and written a short explanation of who, if anyone, is
-identified as making a criticism. You are not shown the article itself --
-your only task is to read that explanation and decide which final answer
-it supports.\
+You are a media analysis assistant specialised in Swiss public affairs. A first, quick pass over \
+a newspaper article already concluded that a specific criticism in it is not attributed to any \
+outside voice. Your task is to re-examine the SAME article once more, more carefully, specifically \
+to check whether that first pass missed a real outside voice.\
 """
 
 VERIFY_USER_TEMPLATE = """\
-The question was: is the criticism of "{keyword}" attributed to a specific, identifiable actor, or is it just the journalist's own narrative framing?
+In the article below, "{keyword}" is criticized. A first pass already concluded that this \
+criticism is JOURNALIST -- the article's own narrative framing, with no outside voice credited.
 
-Here is the explanation given by the other analyst:
-"{justification}"
+ARTICLE:
+{article_text}
 
-First, quote the specific name, title, or role of any actor this explanation \
-identifies as making or supporting the criticism, if any -- answer "none" if \
-there is none.
-Then, on a new line, answer with exactly one word:
-SOURCED — if the explanation names, quotes, or otherwise identifies any specific actor making the criticism, even briefly or without a full quotation.
-JOURNALIST — if the explanation says no specific actor is identified.\
+An outside voice can be identified as loosely as a named individual, a political party, a canton, \
+an administration, a company, an association, a category of people ("residents," "opponents," \
+"experts"), or survey respondents -- none of this needs a specific person's name to qualify. \
+"{keyword}" itself never counts as that voice just because it is named as the one who made the \
+decision, took the action, or is otherwise the subject of the criticism. A signed byline does not \
+mean the article has no outside sources behind the criticism of "{keyword}" -- a signed piece can \
+still quote or cite someone else's criticism of the target. And sources quoted elsewhere in the \
+article, for other claims or about other people, do not count unless they are specifically the \
+ones credited with the criticism of "{keyword}" itself.
+
+Before answering, go through the article once more and list, one by one, every named individual, \
+political party, canton, administration, company, association, category of people, or other actor \
+mentioned anywhere in connection with the criticism of "{keyword}" -- even if mentioned only \
+briefly, in a quote, in an interview answer or question, or as part of a named group with no \
+individual singled out. For each one you find, check specifically: are THEY the one credited with \
+the criticism of "{keyword}", or are they mentioned for some other reason?
+
+Then say in one or two sentences what you found (name the actor if you found one, or say plainly \
+that the search found none), and finish on a new line with exactly one word:
+SOURCED — if you found an outside voice credited with the criticism of "{keyword}" that the first pass missed.
+JOURNALIST — if, even after this closer search, no outside voice of any kind is credited with that specific criticism.\
 """
 
 
-def build_verify_prompt(row: pd.Series, justification_col: str) -> str:
+def build_verify_prompt(row: pd.Series, text_col: str) -> str:
     alias = row.get("matched_alias", None)
     keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
-    justification = "" if pd.isna(row[justification_col]) else str(row[justification_col]).strip()
-    return VERIFY_USER_TEMPLATE.format(keyword=keyword, justification=justification)
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return VERIFY_USER_TEMPLATE.format(keyword=keyword, article_text=article_text)
 
 
 # --- Last resort (force): a bare one-word decision, no justification asked
