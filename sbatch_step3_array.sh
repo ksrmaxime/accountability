@@ -23,7 +23,8 @@ WORKDIR=/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO
 
 # I/O
 # Input = fichier fusionne produit par l'etape precedente
-INPUT=${1:-"${WORKDIR}/data/processed/step2_clean.parquet"}
+# (sans argument : dernier step 2, via le pointeur data/processed/.last_step2)
+INPUT=${1:-"$(cat "${WORKDIR}/data/processed/.last_step2" 2>/dev/null || echo "${WORKDIR}/data/processed/step2_clean.parquet")"}
 OUTPUT_BASE=${WORKDIR}/data/output/step3
 TEXT_COL=text
 N_ROWS=0        # 0 = toutes les lignes ; mettre ex. 100 pour un test rapide

@@ -4,6 +4,7 @@
 #
 # Usage :
 #   bash launch_pipeline.sh              # pipeline complet depuis le download
+#   bash launch_pipeline.sh download_yearly 2000 2025   # download année par année
 #   bash launch_pipeline.sh step2        # depuis step2 (fichier téléchargé par défaut)
 #   bash launch_pipeline.sh step2  /path/to/downloaded.parquet
 #   bash launch_pipeline.sh step3  /path/to/step2_clean.parquet
@@ -33,6 +34,16 @@ case "$STEP" in
   download)
     JOB_ID=$(sbatch --parsable "${WORKDIR}/sbatch_download.sh")
     echo "Pipeline lancé depuis : download  (job ${JOB_ID})"
+    ;;
+  download_yearly)
+    START_YEAR=${2:-""}
+    END_YEAR=${3:-""}
+    if [[ -z "$START_YEAR" || -z "$END_YEAR" ]]; then
+        echo "Usage : bash launch_pipeline.sh download_yearly <ANNEE_DEBUT> <ANNEE_FIN>"
+        exit 1
+    fi
+    JOB_ID=$(sbatch --parsable "${WORKDIR}/sbatch_download_yearly.sh" "$START_YEAR" "$END_YEAR")
+    echo "Pipeline lancé depuis : download annuel ${START_YEAR}-${END_YEAR}  (1er job ${JOB_ID})"
     ;;
   step2)
     if [[ -n "$INPUT" ]]; then
@@ -84,7 +95,7 @@ case "$STEP" in
     ;;
   *)
     echo "Étape inconnue : '$STEP'"
-    echo "Étapes valides : download | step2 | step3 | step4a | step4b | step5 | step6"
+    echo "Étapes valides : download | download_yearly | step2 | step3 | step4a | step4b | step5 | step6"
     exit 1
     ;;
 esac

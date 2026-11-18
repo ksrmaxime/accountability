@@ -25,214 +25,74 @@ DEFAULT_COLUMNS = [
     "head", "subhead", "content_id", "content",
 ]
 
-DE_TERMS = [
-    "Bürokratie", "Berner Verwaltung", "Papierkrieg", "Verwaltung", "Bundesverwaltung",
-    "Beamtenapparat", "Amtsschimmel", "Regulierungsdichte", "Behörden", "Bürokraten",
-    "Beamte", "Staatsangestellte",
-]
-DE_LEVEL = ["Bund", "Bundes", "Kanton", "kantonal", "Schweiz"]
+# -----------------------------
+# Mots-clés de la requête Swissdox : tout est défini en toutes lettres dans
+# src/keywords_list.py (départements + unités fédérales, agences
+# indépendantes, conseillers fédéraux ; déclinaisons allemandes et variantes
+# d'accents / de casse comprises).
+#
+# Ce module ne fait que rassembler les formes et ajouter l'autre apostrophe
+# (' <-> ’) aux termes qui en contiennent une.
+#
+# NB : le step 2 ne lit PAS ces listes ; il fait son propre matching via
+# src/target_taxonomy.py.
+# -----------------------------
+try:  # src/ sur le sys.path
+    from keywords_list import (  # noqa: E402
+        COUNCILLORS as _COUNCILLORS_LIST,
+        FEDERAL_UNITS as _FEDERAL_UNITS_LIST,
+        INDEPENDENT_AGENCIES as _INDEPENDENT_AGENCIES_LIST,
+    )
+except ImportError:  # import via le package "src"
+    from src.keywords_list import (  # noqa: E402
+        COUNCILLORS as _COUNCILLORS_LIST,
+        FEDERAL_UNITS as _FEDERAL_UNITS_LIST,
+        INDEPENDENT_AGENCIES as _INDEPENDENT_AGENCIES_LIST,
+    )
 
-FR_TERMS = [
-    "Bureaucratie", "Administration publique", "Administration fédérale", "Appareil administratif",
-    "Appareil étatique", "Appareil de l'État", "Autorités administratives", "Services de l'État",
-    "Services publics", "Fonction publique", "Pouvoir administratif", "Autorités cantonales",
-    "Administration centrale", "Départements fédéraux", "Offices fédéraux", "Organes de l'État",
-    "Technocratie", "Bureaucrates", "Fonctionnaires", "Employés de l'État",
-]
-FR_LEVEL = ["fédéral", "federal", "federale", "cantonal", "cantonale", "Suisse"]
+_APOSTROPHES = ("'", "’")
 
-DEPARTMENTS = [
-    "VBS", "DDPS", "Eidgenössische Departement für Verteidigung, Bevölkerungsschutz und Sport",
-    "Département fédéral de la défense, de la protection de la population et des sports",
-    "EDA", "DFAE", "Eidgenössische Departement für auswärtige Angelegenheiten",
-    "Département fédéral des affaires étrangères",
-    "UVEK", "DETEC", "Eidgenössische Departement für Umwelt, Verkehr, Energie und Kommunikation",
-    "Département fédéral de l'environnement, des transports, de l'énergie et de la communication",
-    "EJPD", "DFJP", "Eidgenössische Justiz- und Polizeidepartement",
-    "Département fédéral de justice et police",
-    "EDI", "DFI", "Eidgenössische Departement des Innern", "Département fédéral de l'intérieur",
-    "EFD", "DFF", "Eidgenössische Finanzdepartement", "Département fédéral des finances",
-    "WBF", "DEFR", "Eidgenössische Departement für Wirtschaft, Bildung und Forschung",
-    "Département fédéral de l'économie, de la formation et de la recherche",
-]
 
-# Federal councillors 2000–present (from run2_prompts.py compositions)
-COUNCILLORS = [
-    "Joseph Deiss", "Ruth Dreifuss", "Ruth Metzler-Arnold", "Adolf Ogi",
-    "Kaspar Villiger", "Pascal Couchepin", "Moritz Leuenberger", "Samuel Schmid",
-    "Micheline Calmy-Rey", "Christoph Blocher", "Hans-Rudolf Merz", "Doris Leuthard",
-    "Eveline Widmer-Schlumpf", "Ueli Maurer", "Didier Burkhalter", "Simonetta Sommaruga",
-    "Johann Schneider-Ammann", "Alain Berset", "Guy Parmelin", "Ignazio Cassis",
-    "Karin Keller-Sutter", "Viola Amherd", "Elisabeth Baume-Schneider", "Albert Rösti",
-    "Beat Jans", "Martin Pfister",
-]
+def _norm_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
 
-# Administrative units of each department (FR + DE names and abbreviations)
-# NOTE: 2-letter abbreviations (DV, DC, KD, DR, OA) and ambiguous short ones
-# (BAR, BAG, BIT, BWL) are intentionally omitted — they are common standalone
-# words in FR/DE press and would generate false positives.
-ADMIN_UNITS = [
-    # ── DFAE / EDA ──────────────────────────────────────────────────────────
-    "SG-DFAE", "GS-EDA",
-    "Direction du droit international public", "DDIP",
-    "Direktion für Völkerrecht",
-    "Direction consulaire",
-    "Konsularische Direktion",
-    "Direction du développement et de la coopération", "DDC",
-    "Direktion für Entwicklung und Zusammenarbeit", "DEZA",
-    "Direction des ressources",
-    "Direktion für Ressourcen",
-    # ── DFI / EDI ───────────────────────────────────────────────────────────
-    "SG-DFI", "GS-EDI",
-    "Bureau fédéral de l'égalité entre femmes et hommes", "BFEG",
-    "Eidgenössisches Büro für die Gleichstellung von Frau und Mann", "EBG",
-    "Office fédéral de la culture", "OFC",
-    "Bundesamt für Kultur", "BAK",
-    "Archives fédérales suisses", "AFS",
-    "Schweizerisches Bundesarchiv",
-    "Office fédéral de météorologie et de climatologie", "MétéoSuisse",
-    "Bundesamt für Meteorologie und Klimatologie", "MeteoSchweiz",
-    "Office fédéral de la santé publique", "OFSP",
-    "Bundesamt für Gesundheit", "BAG",
-    "Office fédéral de la sécurité alimentaire et des affaires vétérinaires", "OSAV",
-    "Bundesamt für Lebensmittelsicherheit und Veterinärwesen", "BLV",
-    "Office fédéral de la statistique", "OFS",
-    "Bundesamt für Statistik", "BFS",
-    "Office fédéral des assurances sociales", "OFAS",
-    "Bundesamt für Sozialversicherungen", "BSV",
-    # ── DFJP / EJPD ─────────────────────────────────────────────────────────
-    "SG-DFJP", "GS-EJPD",
-    "Secrétariat d'État aux migrations", "SEM",
-    "Staatssekretariat für Migration",
-    "Office fédéral de la justice", "OFJ",
-    "Bundesamt für Justiz",
-    "Office fédéral de la police", "fedpol",
-    "Bundesamt für Polizei",
-    "Service Surveillance de la correspondance par poste et télécommunication", "Service SCPT",
-    "Dienst Überwachung Post- und Fernmeldeverkehr", "ÜPF",
-    # ── DDPS / VBS ──────────────────────────────────────────────────────────
-    "SG-DDPS", "GS-VBS",
-    "Office fédéral de la protection de la population", "OFPP",
-    "Bundesamt für Bevölkerungsschutz", "BABS",
-    "Office fédéral de l'armement", "armasuisse",
-    "Bundesamt für Rüstung",
-    "Office fédéral de topographie", "swisstopo",
-    "Bundesamt für Landestopografie",
-    "Office fédéral du sport", "OFSPO",
-    "Bundesamt für Sport", "BASPO",
-    "Office fédéral de la cybersécurité", "OFCS",
-    "Bundesamt für Cybersicherheit", "BACS",
-    "Secrétariat d'État à la politique de sécurité", "SEPOS",
-    "Staatssekretariat für Sicherheitspolitik",
-    "Armée suisse", "Schweizer Armee",
-    "Service de renseignement de la Confédération", "SRC",
-    "Nachrichtendienst des Bundes", "NDB",
-    "Office de l'auditeur en chef", "OAC",
-    "Oberauditorat",
-    # ── DFF / EFD ───────────────────────────────────────────────────────────
-    "SG-DFF", "GS-EFD",
-    "Secrétariat d'État aux questions financières internationales", "SFI",
-    "Staatssekretariat für internationale Finanzfragen", "SIF",
-    "Administration fédérale des finances", "AFF",
-    "Eidgenössische Finanzverwaltung", "EFV",
-    "Office fédéral du personnel", "OFPER",
-    "Eidgenössisches Personalamt", "EPA",
-    "Administration fédérale des contributions", "AFC",
-    "Eidgenössische Steuerverwaltung", "ESTV",
-    "Office fédéral de la douane et de la sécurité des frontières", "OFDF",
-    "Bundesamt für Zoll und Grenzsicherheit", "BAZG",
-    "Office fédéral de l'informatique et de la télécommunication", "OFIT",
-    "Bundesamt für Informatik und Telekommunikation",
-    "Office fédéral des constructions et de la logistique", "OFCL",
-    "Bundesamt für Bauten und Logistik", "BBL",
-    # ── DEFR / WBF ──────────────────────────────────────────────────────────
-    "SG-DEFR", "GS-WBF",
-    "Secrétariat d'État à l'économie", "SECO",
-    "Staatssekretariat für Wirtschaft",
-    "Secrétariat d'État à la formation, à la recherche et à l'innovation", "SEFRI",
-    "Staatssekretariat für Bildung, Forschung und Innovation", "SBFI",
-    "Office fédéral de l'agriculture", "OFAG",
-    "Bundesamt für Landwirtschaft", "BLW",
-    "Office fédéral pour l'approvisionnement économique du pays", "OFAE",
-    "Bundesamt für wirtschaftliche Landesversorgung",
-    "Office fédéral du logement", "OFL",
-    "Bundesamt für Wohnungswesen", "BWO",
-    "Office fédéral du service civil", "CIVI",
-    "Bundesamt für Zivildienst", "ZIVI",
-    # ── DETEC / UVEK ────────────────────────────────────────────────────────
-    "SG-DETEC", "GS-UVEK",
-    "Office fédéral des transports", "OFT",
-    "Bundesamt für Verkehr", "BAV",
-    "Office fédéral de l'aviation civile", "OFAC",
-    "Bundesamt für Zivilluftfahrt", "BAZL",
-    "Office fédéral de l'énergie", "OFEN",
-    "Bundesamt für Energie", "BFE",
-    "Office fédéral des routes", "OFROU",
-    "Bundesamt für Strassen", "ASTRA",
-    "Office fédéral de la communication", "OFCOM",
-    "Bundesamt für Kommunikation", "BAKOM",
-    "Office fédéral de l'environnement", "OFEV",
-    "Bundesamt für Umwelt", "BAFU",
-    "Office fédéral du développement territorial", "ARE",
-    "Bundesamt für Raumentwicklung",
-]
 
-# Independent regulatory agencies and extra-departmental units (FR + DE)
-INDEPENDENT_AGENCIES = [
-    "Inspection fédérale de la sécurité nucléaire", "IFSN",
-    "Eidgenössisches Nuklearsicherheitsinspektorat", "ENSI",
-    "Inspection fédérale des installations à courant fort",
-    "Eidgenössisches Starkstrominspektorat", "ESTI",
-    "Service suisse d'enquête de sécurité", "SESE",
-    "Schweizerische Sicherheitsuntersuchungsstelle", "SUST",
-    "Commission fédérale de l'électricité", "EICom",
-    "Eidgenössische Elektrizitätskommission", "ElCom",
-    "Commission fédérale de la communication", "ComCom",
-    "Eidgenössische Kommunikationskommission",
-    "Autorité indépendante d'examen des plaintes en matière de radio-télévision", "AIEP",
-    "Unabhängige Beschwerdeinstanz für Radio und Fernsehen", "UBI",
-    "Commission fédérale de la poste", "PostCom",
-    "Eidgenössische Postkommission",
-    "Commission des chemins de fer", "RailCom",
-    "Kommission für den Eisenbahnverkehr",
-    "Surveillance des prix", "SPR",
-    "Preisüberwachung", "PUE",
-    "Commission de la concurrence", "COMCO",
-    "Wettbewerbskommission", "WEKO",
-    "Domaine des Écoles polytechniques fédérales", "domaine des EPF",
-    "Bereich der Eidgenössischen Technischen Hochschulen", "ETH-Bereich",
-    "Haute école fédérale en formation professionnelle", "HEFP",
-    "Eidgenössisches Hochschulinstitut für Berufsbildung", "EHB",
-    "Agence suisse pour l'encouragement de l'innovation", "Innosuisse",
-    "Schweizerische Agentur für Innovationsförderung",
-    "Autorité fédérale de surveillance des marchés financiers", "FINMA",
-    "Eidgenössische Finanzmarktaufsicht",
-    "Contrôle fédéral des finances", "CDF",
-    "Eidgenössische Finanzkontrolle", "EFK",
-    "Caisse fédérale de pensions PUBLICA", "Pensionskasse des Bundes PUBLICA", "PUBLICA",
-    "Institut fédéral de la propriété intellectuelle", "IPI",
-    "Eidgenössisches Institut für Geistiges Eigentum", "IGE",
-    "Institut fédéral de métrologie", "METAS",
-    "Eidgenössisches Institut für Metrologie",
-    "Institut suisse de droit comparé", "ISDC",
-    "Schweizerisches Institut für Rechtsvergleichung", "SIR",
-    "Autorité fédérale de surveillance en matière de révision", "ASR",
-    "Eidgenössische Revisionsaufsichtsbehörde", "RAB",
-    "Commission fédérale des maisons de jeu", "CFMJ",
-    "Eidgenössische Spielbankenkommission", "ESBK",
-    "Commission arbitrale fédérale pour la gestion de droits d'auteur et de droits voisins", "CAF",
-    "Eidgenössische Schiedskommission für die Verwertung von Urheberrechten", "ESchK",
-    "Commission nationale de prévention de la torture", "CNPT",
-    "Nationale Kommission zur Verhütung von Folter", "NKVF",
-    "Commission fédérale des migrations", "CFM",
-    "Eidgenössische Migrationskommission", "EKM",
-    "Institut suisse des produits thérapeutiques", "Swissmedic",
-    "Schweizerisches Heilmittelinstitut",
-    "Musée national suisse", "MNS",
-    "Schweizerisches Nationalmuseum", "SNM",
-    "Fondation suisse pour la culture Pro Helvetia",
-    "Schweizerische Kulturstiftung Pro Helvetia", "Pro Helvetia",
-]
+def apostrophe_variants(term: str) -> List[str]:
+    if not any(a in term for a in _APOSTROPHES):
+        return [term]
+    base = term.replace("’", "'")
+    return [base, base.replace("'", "’")]
+
+
+def _query_terms(terms: List[str]) -> List[str]:
+    """Normalise les espaces, ajoute les variantes d'apostrophe, dédoublonne (ordre stable)."""
+    return list(dict.fromkeys(
+        v for t in terms if _norm_spaces(t) for v in apostrophe_variants(_norm_spaces(t))
+    ))
+
+
+def _entity_surfaces(entities: List[Dict[str, Any]]) -> List[str]:
+    """Toutes les formes (noms FR/DE déclinés, abréviations, variantes de casse)
+    d'une liste d'entités au format de keywords_list.py (FEDERAL_UNITS,
+    INDEPENDENT_AGENCIES)."""
+    terms: List[str] = []
+    for u in entities:
+        for variants in u["fr_names"]:          # [forme de référence, variantes casse/accents...]
+            terms.extend(variants)
+        for declined in u["de_names"]:          # [forme de référence, déclinaisons...]
+            terms.extend(declined)
+        case_variants = u.get("abbrev_case_variants", {})
+        for lang in ("fr", "de"):
+            for ab in [u[f"{lang}_abbrev"]] + u[f"{lang}_alt_abbrevs"]:
+                if ab:
+                    terms.append(ab)
+                    terms.extend(case_variants.get(ab, []))
+    return _query_terms(terms)
+
+
+FEDERAL_UNIT_TERMS: List[str] = _entity_surfaces(_FEDERAL_UNITS_LIST)
+INDEPENDENT_AGENCY_TERMS: List[str] = _entity_surfaces(_INDEPENDENT_AGENCIES_LIST)
+COUNCILLOR_TERMS: List[str] = _query_terms([f for forms in _COUNCILLORS_LIST for f in forms])
 
 
 def build_query_payload(
@@ -254,14 +114,9 @@ def build_query_payload(
         "languages": languages,
         "content": {
             "OR": [
-                # {"OR": DE_TERMS},   # temporarily disabled
-                # {"OR": FR_TERMS},   # temporarily disabled
-                # {"OR": DE_LEVEL},   # temporarily disabled
-                # {"OR": FR_LEVEL},   # temporarily disabled
-                {"OR": DEPARTMENTS},
-                {"OR": ADMIN_UNITS},
-                {"OR": INDEPENDENT_AGENCIES},
-                {"OR": COUNCILLORS},
+                {"OR": FEDERAL_UNIT_TERMS},
+                {"OR": INDEPENDENT_AGENCY_TERMS},
+                {"OR": COUNCILLOR_TERMS},
             ]
         },
     }
@@ -324,38 +179,77 @@ class SwissdoxClient:
             raise RuntimeError(f"Swissdox missing queryId: {resp}")
         return str(qid)
 
+    # Erreurs serveur passagères (500, 502, 503, 504, coupure réseau) : on
+    # réessaie au lieu de faire échouer un job de plusieurs heures. Une erreur
+    # 4xx (clé API refusée, requête invalide) reste immédiatement fatale.
+    _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+    def _get_with_retry(self, url: str, *, what: str, max_tries: int = 10, base_sleep_s: int = 30):
+        for attempt in range(1, max_tries + 1):
+            try:
+                r = self.session.get(url, headers=self.headers, timeout=self.timeout)
+                if r.status_code not in self._RETRY_STATUS:
+                    r.raise_for_status()
+                    return r
+                err = f"HTTP {r.status_code}"
+            except (requests.ConnectionError, requests.Timeout) as e:
+                err = type(e).__name__
+            if attempt == max_tries:
+                raise RuntimeError(f"Swissdox {what}: échec après {max_tries} essais ({err})")
+            wait = min(base_sleep_s * 2 ** (attempt - 1), 30 * 60)   # 30 s, 1 min, 2 min, ... max 30 min
+            print(f"[Swissdox] {what}: {err}, nouvel essai {attempt + 1}/{max_tries} dans {wait}s", flush=True)
+            time.sleep(wait)
+
     def wait_for_download_url(
         self,
         query_id: str,
         *,
-        max_wait_s: int = 24 * 60 * 60,
-        poll_every_s: int = 60,
+        max_wait_s: int = 12 * 60 * 60,
+        poll_every_s: int = 30,
     ) -> str:
-        deadline = time.time() + max_wait_s
+        start = time.time()
+        deadline = start + max_wait_s
+        last_log = float("-inf")   # 1re ligne de suivi tout de suite
+        missing_since = None
         while time.time() < deadline:
-            rs = self.session.get(self.status_url, headers=self.headers, timeout=self.timeout)
-            rs.raise_for_status()
+            rs = self._get_with_retry(self.status_url, what="/status")
             status_list = rs.json()
+            now = time.time()
 
             job = next((j for j in status_list if str(j.get("id")) == str(query_id)), None)
             if not job:
-                time.sleep(poll_every_s)
-                continue
+                # La requête n'apparaît pas (encore / plus) dans /status. Juste après
+                # une soumission c'est normal quelques minutes ; au-delà de 30 min,
+                # elle a disparu (expirée, supprimée ou échouée côté Swissdox) :
+                # on arrête au lieu d'attendre en silence jusqu'à max_wait_s.
+                missing_since = missing_since or now
+                if now - missing_since > 30 * 60:
+                    ids = [str(j.get("id")) for j in status_list][-10:]
+                    raise RuntimeError(
+                        f"Swissdox: queryId {query_id} absent de /status depuis 30 min "
+                        f"(10 derniers ids listés: {ids}). Relancer sans --query-id pour soumettre à nouveau."
+                    )
+            else:
+                missing_since = None
+                if job.get("error"):
+                    raise RuntimeError(f"Swissdox job error: {job['error']}")
+                url = job.get("downloadUrl")
+                if url:
+                    print(f"[Swissdox] résultat prêt après {(now - start) / 3600:.1f} h d'attente", flush=True)
+                    return self._normalize_download_url(url)
 
-            if job.get("error"):
-                raise RuntimeError(f"Swissdox job error: {job['error']}")
-
-            url = job.get("downloadUrl")
-            if url:
-                return self._normalize_download_url(url)
+            if now - last_log >= 10 * 60:   # une ligne de suivi toutes les 10 min
+                state = ({k: v for k, v in job.items() if k not in ("query", "downloadUrl")}
+                         if job else "requête absente de /status")
+                print(f"[Swissdox] attente {(now - start) / 3600:.1f} h — état: {state}", flush=True)
+                last_log = now
 
             time.sleep(poll_every_s)
 
         raise TimeoutError(f"Swissdox: no downloadUrl after {max_wait_s}s (query_id={query_id})")
 
     def download_tsv_xz(self, download_url: str) -> pd.DataFrame:
-        r = self.session.get(download_url, headers=self.headers, timeout=self.timeout)
-        r.raise_for_status()
+        r = self._get_with_retry(download_url, what="téléchargement", max_tries=6)
         return pd.read_csv(BytesIO(r.content), sep="\t", compression="xz")
 
     def _normalize_download_url(self, download_url: str) -> str:
@@ -379,7 +273,7 @@ def clean_text(s: str) -> str:
     s = html.unescape(s)
     s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
     s = re.sub(r"\s+", " ", s).strip()
-    return s.strip(' """„\'')
+    return s.strip(' "“”„\'')
 
 
 def clean_xml_keep_paragraphs(s: str) -> str:
@@ -489,6 +383,9 @@ def build_article_leads(df_articles: pd.DataFrame, *, content_col: str = "conten
 # -----------------------------
 # Top-level pipeline
 # -----------------------------
+ARTICLES_FILE = "swissdox_articles_lead.parquet"
+
+
 def run_pipeline(
     *,
     start_date: str,
@@ -500,8 +397,9 @@ def run_pipeline(
     query_name: str,
     comment: str,
     out_dir: Path,
-    resume_query_id: str | None = None,
     test: bool = False,
+    max_wait_s: int = 12 * 60 * 60,
+    query_id: str | None = None,
 ) -> Dict[str, Path]:
     load_dotenv()
     api_key = os.getenv("SWISSDOX_API_KEY")
@@ -509,23 +407,27 @@ def run_pipeline(
     if not api_key or not api_secret:
         raise RuntimeError("Missing SWISSDOX_API_KEY / SWISSDOX_API_SECRET in .env")
 
-    client = SwissdoxClient(api_key=api_key, api_secret=api_secret)
+    payload = build_query_payload(
+        start_date=start_date,
+        end_date=end_date,
+        languages=languages,
+        sources=sources,
+        max_results=max_results,
+        columns=DEFAULT_COLUMNS,
+        query_name=query_name,
+        comment=comment,
+        expiration_date=expiration_date,
+    )
 
-    if resume_query_id:
-        print(f"[Swissdox] Resuming existing queryId={resume_query_id} (skipping submission)")
-        qid = resume_query_id
+    client = SwissdoxClient(api_key=api_key, api_secret=api_secret)
+    if query_id:
+        # Reprise : la requête a déjà été soumise (ex. job précédent interrompu),
+        # on ne la renvoie pas, on attend / télécharge son résultat.
+        qid = str(query_id)
+        print("[Swissdox] reprise de la requête existante (pas de nouvelle soumission)")
     else:
-        payload = build_query_payload(
-            start_date=start_date,
-            end_date=end_date,
-            languages=languages,
-            sources=sources,
-            max_results=max_results,
-            columns=DEFAULT_COLUMNS,
-            query_name=query_name,
-            comment=comment,
-            expiration_date=expiration_date,
-        )
+        print(f"[Swissdox] requête : {len(FEDERAL_UNIT_TERMS)} termes départements/unités, "
+              f"{len(INDEPENDENT_AGENCY_TERMS)} agences, {len(COUNCILLOR_TERMS)} conseillers")
         qid = client.submit_query(
             payload["yaml_payload"],
             name=payload["meta"]["name"],
@@ -533,9 +435,9 @@ def run_pipeline(
             expiration_date=payload["meta"]["expirationDate"],
             test=test,
         )
-        print(f"[Swissdox] queryId={qid}")
+    print(f"[Swissdox] queryId={qid}")
 
-    url = client.wait_for_download_url(qid)
+    url = client.wait_for_download_url(qid, max_wait_s=max_wait_s)
     print(f"[Swissdox] downloadUrl={url}")
 
     df_raw = client.download_tsv_xz(url)
@@ -555,31 +457,13 @@ def run_pipeline(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    run_tag = time.strftime("%Y%m%d_%H%M%S")
+    p_articles_parquet = out_dir / ARTICLES_FILE
+    p_articles_csv = out_dir / "swissdox_articles_lead.csv"
 
-    # One full parquet for downstream pipeline use
-    p_parquet = out_dir / f"swissdox_all_{run_tag}.parquet"
-    df_leads.to_parquet(p_parquet, index=False)
-    print(f"[Swissdox] saved full parquet → {p_parquet}")
+    df_leads.to_parquet(p_articles_parquet, index=False)
+    df_leads.to_csv(p_articles_csv, index=False)
 
-    # One CSV per year for easy inspection
-    out_paths: Dict[str, Path] = {"full_parquet": p_parquet}
-    if "pubtime" in df_leads.columns:
-        df_leads["_year"] = df_leads["pubtime"].apply(
-            lambda d: d.year if hasattr(d, "year") else int(str(d)[:4])
-        )
-        for year, df_year in df_leads.drop(columns="_year").groupby(df_leads["_year"]):
-            p_csv = out_dir / f"swissdox_{year}_{run_tag}.csv"
-            df_year.to_csv(p_csv, index=False)
-            print(f"[Swissdox] saved year {year} CSV ({len(df_year):,} rows) → {p_csv}")
-            out_paths[f"csv_{year}"] = p_csv
-    else:
-        p_csv = out_dir / f"swissdox_all_{run_tag}.csv"
-        df_leads.to_csv(p_csv, index=False)
-        out_paths["csv_all"] = p_csv
-
-    pointer_path = out_dir / ".last_download"
-    pointer_path.write_text(str(p_parquet), encoding="utf-8")
-    print(f"[Swissdox] pointer → {pointer_path} (-> {p_parquet})")
-
-    return out_paths
+    return {
+        "articles_lead_parquet": p_articles_parquet,
+        "articles_lead_csv": p_articles_csv,
+    }

@@ -1,31 +1,35 @@
 #!/bin/bash -l
 #SBATCH --job-name=step2_clean
 #SBATCH --partition=cpu
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/step2_%j.out
 #SBATCH --error=logs/step2_%j.err
 #SBATCH --mail-user=maxime.kaiser@unil.ch
 #SBATCH --mail-type=END,FAIL
 
-dcsrsoft use 20241118
-
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-set -euo pipefail
+set -eo pipefail
+
+# Logs écrits immédiatement dans le .out (sinon Python les garde en mémoire)
+export PYTHONUNBUFFERED=1
 
 REPO_DIR="/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO"
 cd "${REPO_DIR}"
 
 mkdir -p logs data/processed
 
+# module/dcsrsoft scripts reference unset vars internally, so -u must stay off until after they load
 module purge
+dcsrsoft use 20241118
 module load python/3.12.1
 
+set -u
 source .venv/bin/activate
 
 python --version
@@ -54,9 +58,14 @@ if [[ ! -f "$INPUT" ]]; then
     exit 1
 fi
 
+# Sortie : dossier propre à ce job (data/processed/step2_job<ID>/), qui
+# contient step2_clean.{parquet,csv}, keywords_reference.csv et
+# step2_target_counts.csv. data/processed/.last_step2 pointe sur le parquet.
+OUTDIR="${REPO_DIR}/data/processed/step2_job${SLURM_JOB_ID}"
 python scripts/step2_clean_targets.py \
   --input      "$INPUT" \
-  --output_dir data/processed
+  --output_dir "$OUTDIR" \
+  --workers    "${SLURM_CPUS_PER_TASK:-1}"
 
 echo "Job finished."
 

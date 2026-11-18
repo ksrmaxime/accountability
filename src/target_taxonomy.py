@@ -1,5 +1,16 @@
 # src/target_taxonomy.py
 """
+NOTE (nov. 2026): step 2 no longer matches targets with this module. Matching,
+cleaning rules and target metadata now live in src/step2_targets.py, built on
+src/keywords_list.py (the same keywords as the Swissdox query). This module is
+still used for:
+  - the federal council compositions (get_council_for_date,
+    get_councillor_term, is_councillor_in_office) ;
+  - the historical target labels (DEPARTMENT_ALIASES, ADMIN_UNIT_GROUPS,
+    INDEPENDENT_AGENCY_GROUPS): step2_targets.py reuses them so that every
+    target that already existed keeps the same `keyword` as in the GOLD files.
+match_targets() / match_targets_detailed() below are legacy and unused.
+
 Single source of truth for the "targets" the accountability pipeline tracks
 in Swiss press articles: the 7 federal departments, their administrative
 units, the independent agencies, and the federal councillors (2000-present).
@@ -677,9 +688,16 @@ def self_check(legacy_departments=None, legacy_admin_units=None, legacy_independ
 
 
 if __name__ == "__main__":
-    from src.download_src import DEPARTMENTS, ADMIN_UNITS, INDEPENDENT_AGENCIES
-    self_check(
-        legacy_departments=DEPARTMENTS,
-        legacy_admin_units=ADMIN_UNITS,
-        legacy_independent_agencies=INDEPENDENT_AGENCIES,
+    # The Swissdox query keywords now live in src/keywords_list.py
+    # (departments, units, independent agencies with declined forms, current
+    # + OLD), which this taxonomy does not mirror yet -- so departments,
+    # units and agencies are only checked for internal consistency here.
+    # Councillors are cross-checked: same people, same reference spelling.
+    self_check()
+    from src.keywords_list import COUNCILLORS as _KW_COUNCILLORS
+    _kw_names = [forms[0] for forms in _KW_COUNCILLORS]
+    assert _kw_names == COUNCILLORS, (
+        f"keywords_list.COUNCILLORS differs from taxonomy COUNCILLORS: "
+        f"{set(_kw_names) ^ set(COUNCILLORS)}"
     )
+    print("[self_check] councillors identical in keywords_list.py and target_taxonomy.py")
