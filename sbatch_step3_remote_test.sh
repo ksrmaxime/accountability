@@ -72,7 +72,7 @@ WORKDIR=/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO
 INPUT=${1:-"$(cat "${WORKDIR}/data/processed/.last_step2" 2>/dev/null || echo "${WORKDIR}/data/processed/step2_clean_GOLD800.parquet")"}
 OUTPUT_BASE=${WORKDIR}/data/output/step3_remote
 TEXT_COL=text
-N_ROWS=20        # 0 = toutes les lignes ; mettre ex. 20 pour un essai rapide avant le run complet
+N_ROWS=0        # 0 = toutes les lignes ; mettre ex. 20 pour un essai rapide avant le run complet
 
 # Model / backend
 MODEL_PATH=${2:-"swiss-ai/Apertus-v1.5-70B-thinking"}
