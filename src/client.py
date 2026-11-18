@@ -375,3 +375,46 @@ class TransformersClient:
             left = self._logprob_with_fallback(prompts[:mid], candidate_letters, candidate_ids, max_input_tokens)
             right = self._logprob_with_fallback(prompts[mid:], candidate_letters, candidate_ids, max_input_tokens)
             return left + right
+
+
+# ----------------------------------------------------------------------------
+# Factory -- 2026-11-18, added alongside the new remote-API backend
+# (src/client_remote.py). Every script that builds its LLM client now goes
+# through build_client(args) instead of constructing TransformersClient
+# directly, so --backend litellm works with zero other changes to that
+# script's own logic/prompts/parsing. See scripts/step3_criticism_detection.py
+# for the reference CLI wiring (--api_base/--api_key_env/--concurrency).
+# ----------------------------------------------------------------------------
+def build_client(args):
+    """Returns the right client for args.backend:
+      - 'vllm' / 'transformers' -> TransformersClient (local GPU, unchanged).
+      - 'litellm' -> RemoteAPIClient (src/client_remote.py), sending requests
+        to an OpenAI-compatible gateway (UNIL's litellm proxy fronting
+        UNIL-CI and CSCS-hosted models, e.g. swiss-ai/Apertus-v1.5-70B)
+        instead of loading a model locally. args.model_path doubles as the
+        remote model identifier for this backend -- no separate CLI flag,
+        to keep every script's existing --model_path argument meaningful
+        for both backends.
+    """
+    if args.backend in ("vllm", "transformers"):
+        return TransformersClient(
+            LLMConfig(
+                model_path=args.model_path,
+                dtype=args.dtype,
+                trust_remote_code=args.trust_remote_code,
+                backend=args.backend,
+            )
+        )
+    elif args.backend == "litellm":
+        from src.client_remote import RemoteAPIClient, RemoteAPIConfig
+
+        return RemoteAPIClient(
+            RemoteAPIConfig(
+                api_base=args.api_base,
+                model=args.model_path,
+                api_key_env=args.api_key_env,
+                concurrency=args.concurrency,
+            )
+        )
+    else:
+        raise ValueError(f"Unknown backend: {args.backend!r}")

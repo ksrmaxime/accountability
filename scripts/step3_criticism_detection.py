@@ -137,7 +137,7 @@ sys.path.append(str(ROOT))
 
 import pandas as pd
 
-from src.client import TransformersClient, LLMConfig
+from src.client import build_client
 from src.runner import run_llm_dataframe, RunConfig
 from src.step3_prompts import (
     SYSTEM_PROMPT, build_user_prompt,
@@ -195,10 +195,36 @@ def main() -> int:
     ap.add_argument("--n_rows",       type=int, default=0)
 
     # --- Model ---
-    ap.add_argument("--model_path",        required=True)
-    ap.add_argument("--dtype",             required=True, choices=["bf16", "fp16", "auto"])
-    ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
-    ap.add_argument("--trust_remote_code", action="store_true")
+    # 2026-11-18: --backend "litellm" added alongside "vllm"/"transformers" --
+    # sends requests to an OpenAI-compatible gateway (src/client_remote.py)
+    # instead of loading a model locally, e.g. to test swiss-ai/Apertus-v1.5-70B
+    # hosted at CSCS via UNIL's litellm proxy on a plain CPU allocation. For
+    # this backend, --model_path doubles as the remote model identifier (e.g.
+    # "swiss-ai/Apertus-v1.5-70B") rather than a local filesystem path, and
+    # --dtype/--trust_remote_code are simply ignored. See src/client.py's
+    # build_client() and src/client_remote.py's module docstring.
+    ap.add_argument("--model_path",        required=True,
+                    help="Local model path (vllm/transformers backends) or remote model "
+                         "identifier, e.g. 'swiss-ai/Apertus-v1.5-70B' (litellm backend).")
+    ap.add_argument("--dtype",             default="bf16", choices=["bf16", "fp16", "auto"],
+                    help="Ignored for --backend litellm.")
+    ap.add_argument("--backend",           default="transformers",
+                    choices=["vllm", "transformers", "litellm"])
+    ap.add_argument("--trust_remote_code", action="store_true",
+                    help="Ignored for --backend litellm.")
+
+    # --- Remote API (--backend litellm only) ---
+    ap.add_argument("--api_base",    default="https://litellm.dcsr.unil.ch/v1",
+                    help="Base URL for the OpenAI-compatible gateway (--backend litellm only).")
+    ap.add_argument("--api_key_env", default="UNIL_LITELLM_API_KEY",
+                    help="Name of the env var holding the API key (--backend litellm only). "
+                         "Never hardcode the key itself -- export it before launching.")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="Concurrent HTTP requests (--backend litellm only) -- replaces "
+                         "--batch_size's role as the parallelism knob for this backend, since "
+                         "there is no local GPU batch to size. No rate-limit guidance was given "
+                         "by UNIL/CSCS for this key as of 2026-11-18, so this default errs "
+                         "conservative; raise it once you know what the service can take.")
 
     # --- Inference: pass 1 (draft, reads the full article) ---
     ap.add_argument("--batch_size",        required=True, type=int)
@@ -361,14 +387,7 @@ def main() -> int:
             working[col] = pd.Series(pd.NA, index=working.index, dtype=dtype)
 
     # --- LLM client ---
-    client = TransformersClient(
-        LLMConfig(
-            model_path=args.model_path,
-            dtype=args.dtype,
-            trust_remote_code=args.trust_remote_code,
-            backend=args.backend,
-        )
-    )
+    client = build_client(args)
 
     # --- Pass 1: draft (justification + first-guess label, from the article) ---
     draft_cfg = RunConfig(
