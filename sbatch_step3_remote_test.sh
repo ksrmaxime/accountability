@@ -21,9 +21,16 @@ set -euo pipefail
 # is EXACTLY the same step3 script used on CURNAGL's GPU partition
 # (sbatch_step3_array.sh); only the --backend/--model_path/--api_* args differ.
 #
+# API key: read from a .env file at the repo root (UNIL_LITELLM_API_KEY=...),
+# same convention as src/download_src.py's existing SWISSDOX_API_KEY/
+# SWISSDOX_API_SECRET -- see .env.example. .env is already gitignored, so add
+# the real key there on EACH machine that runs this (git never carries .env
+# between CURNAGL and your laptop -- that file simply isn't part of what
+# push/pull moves). No "export" needed in your shell: src/client_remote.py
+# calls load_dotenv() itself, exactly like the existing download step.
+#
 # BEFORE running this on real data, run the smoke test by hand once per model
 # you intend to use (cheap, ~4 API calls, no sbatch needed):
-#     export UNIL_LITELLM_API_KEY='...'
 #     python scripts/check_remote_api.py --model swiss-ai/Apertus-v1.5-70B
 # It specifically checks whether logprob_many (needed by the validation pass
 # below) actually works against this proxy -- this has NEVER been verified,
@@ -38,7 +45,6 @@ set -euo pipefail
 # you decide this backend is worth keeping.
 #
 # Usage:
-#   export UNIL_LITELLM_API_KEY='...'          # never commit this value
 #   sbatch sbatch_step3_remote_test.sh [<input>] [<model>]
 #
 #   <input>  : step 2 output (parquet/csv) -- defaults to the same
@@ -50,12 +56,12 @@ set -euo pipefail
 #              swiss-ai/Apertus-v1.5-8B[-thinking], swiss-ai/Apertus-v1.5-70B[-thinking].
 # =============================================================================
 
-# -- API key: exported by YOU before launching, never hardcoded here or
-#    committed. Fails fast with a clear message if forgotten, rather than
-#    submitting a job that will error out on its first request an hour later. --
-: "${UNIL_LITELLM_API_KEY:?Export UNIL_LITELLM_API_KEY before running: export UNIL_LITELLM_API_KEY='...'}"
-
 WORKDIR=/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO
+# No bash-level API key check here -- same as sbatch_download.sh relies on
+# src/download_src.py's own load_dotenv()+RuntimeError for SWISSDOX_API_KEY,
+# src/client_remote.py raises a clear error itself if UNIL_LITELLM_API_KEY
+# is missing from .env (checked right before the first request, inside the
+# python process below -- see src/client_remote.py's module docstring).
 
 # I/O
 INPUT=${1:-"$(cat "${WORKDIR}/data/processed/.last_step2" 2>/dev/null || echo "${WORKDIR}/data/processed/step2_clean.parquet")"}

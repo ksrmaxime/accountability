@@ -25,8 +25,13 @@ What it checks, and why each one matters:
      job on real data), it just prints both so you can eyeball whether
      the swing between orders looks reasonable or wildly broken.
 
-Usage (no sbatch needed -- this is cheap, ~4 API calls):
-    export UNIL_LITELLM_API_KEY='...'
+Usage (no sbatch needed -- this is cheap, ~4 API calls). Add your key once
+to a .env file at the repo root (see .env.example) -- same convention as the
+existing SWISSDOX_API_KEY/SWISSDOX_API_SECRET in src/download_src.py:
+    echo "UNIL_LITELLM_API_KEY=sk-..." >> .env   # do this ONCE per machine --
+                                                  # .env is gitignored, so git
+                                                  # never carries it between
+                                                  # CURNAGL and your laptop
     python scripts/check_remote_api.py --model swiss-ai/Apertus-v1.5-70B
 
 Run it for every model you intend to actually use (a smaller/different

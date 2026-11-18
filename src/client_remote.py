@@ -98,6 +98,8 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import requests
+from dotenv import load_dotenv  # same convention as src/download_src.py's own
+                                 # SWISSDOX_API_KEY/SWISSDOX_API_SECRET handling
 
 
 @dataclass(frozen=True)
@@ -116,13 +118,25 @@ class RemoteAPIConfig:
 class RemoteAPIClient:
     def __init__(self, cfg: RemoteAPIConfig):
         self.cfg = cfg
+        # Same pattern as src/download_src.py's SWISSDOX_API_KEY handling:
+        # load_dotenv() searches the current/parent directories for a .env
+        # file and loads it into os.environ (never overwriting a variable
+        # already exported in the shell). So a line like
+        #   UNIL_LITELLM_API_KEY=sk-...
+        # in a gitignored .env at the repo root (see .env.example) is picked
+        # up automatically, with zero sbatch-script changes needed -- no
+        # "export" in your shell required, same as the existing download step.
+        load_dotenv()
         api_key = os.environ.get(cfg.api_key_env)
         if not api_key:
             raise RuntimeError(
-                f"Environment variable '{cfg.api_key_env}' is not set -- export your "
-                f"personal UNIL litellm API key before launching this job, e.g.:\n"
-                f"  export {cfg.api_key_env}='...'\n"
-                f"Never hardcode the key in a committed script."
+                f"'{cfg.api_key_env}' is not set. Add it to a .env file at the repo root "
+                f"(see .env.example), e.g.:\n"
+                f"  {cfg.api_key_env}=sk-...\n"
+                f".env is gitignored -- this is a per-machine file, so add this line on "
+                f"EVERY machine that needs to run this (CURNAGL and your laptop are separate "
+                f"copies; git never carries .env between them). Never hardcode the key in a "
+                f"committed script."
             )
         self._session = requests.Session()
         self._session.headers.update({
