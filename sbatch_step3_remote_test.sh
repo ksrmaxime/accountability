@@ -9,7 +9,12 @@
 #SBATCH --mail-user=maxime.kaiser@unil.ch
 #SBATCH --mail-type=END,FAIL
 
-set -euo pipefail
+# module/dcsrsoft scripts reference unset vars internally, so -u must stay
+# off until after they load (same fix/comment as sbatch_step2.sh -- this
+# script originally had `set -euo pipefail` here, which crashed with
+# "STACK_20241118_NAME: unbound variable" inside /etc/profile.d/lmodstacks.sh
+# the moment `dcsrsoft use 20241118` ran below, since -u was already active).
+set -eo pipefail
 
 # =============================================================================
 # step3 via the UNIL litellm proxy (UNIL-CI / CSCS-hosted models), CPU only.
