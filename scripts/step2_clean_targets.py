@@ -31,9 +31,10 @@ What this step does, in order:
          status, resolved with the article's publication date.
   3. One output row per (article, target). Every alias of the same target
      (FR/DE, abbreviation/full name, declensions, case variants) gives the
-     same `keyword`; `matched_alias` is the most explicit alias found in the
-     article (longest; reference form, e.g. "Bundesamt für Gesundheit" even
-     if the text says "Bundesamtes für Gesundheit"); `keyword_mentions`
+     same `keyword`; `matched_alias` is the most explicit mention found in
+     the article (longest), EXACTLY as written in the text (e.g.
+     "Bundesamtes für Gesundheit", "Secrétariat d'État à l'économie") so the
+     step 3+ prompts anchor on the article's own wording; `keyword_mentions`
      counts how many times the target was matched in the article.
   4. Target metadata on every row: keyword_abbrev, target_type, target_status
      (current / OLD), parent_dept (historical format, as in the GOLD files),

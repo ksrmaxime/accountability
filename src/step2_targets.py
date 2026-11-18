@@ -478,8 +478,10 @@ def _pick_by_date(hits: list[tuple[int, int]], day: str) -> list[tuple[int, int]
 
 def resolve_sentence(sentence: str, pattern: Matcher, lang, day: str,
                      offset: int, found: dict[str, dict[str, int]], counts: dict[str, int]) -> None:
-    """Ajoute à `found` {keyword: {alias de référence: 1re position}} les cibles
-    de la phrase (et compte les mentions dans `counts`)."""
+    """Ajoute à `found` {keyword: {forme telle qu'écrite dans le texte: 1re
+    position}} les cibles de la phrase (et compte les mentions dans `counts`).
+    On garde le mot exact de l'article (déclinaison, accents, apostrophe,
+    casse) pour que les prompts des étapes suivantes l'ancrent dans le texte."""
     for start, text in pattern.finditer(sentence):
         hits = [(rid, fi) for rid, fi in _lookup(text)
                 if not _form_is_ignored(RECORDS[rid].forms[fi])]
@@ -490,7 +492,7 @@ def resolve_sentence(sentence: str, pattern: Matcher, lang, day: str,
             continue
         rid, fi = hits[0]
         kw = RECORDS[rid].keyword
-        found.setdefault(kw, {}).setdefault(RECORDS[rid].forms[fi].reference, offset + start)
+        found.setdefault(kw, {}).setdefault(" ".join(text.split()), offset + start)
         counts[kw] = counts.get(kw, 0) + 1
 
 
