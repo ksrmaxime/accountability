@@ -753,6 +753,14 @@ def main() -> int:
         Path(checkpoint_path).unlink()
         print(f"[checkpoint] Deleted {checkpoint_path}")
 
+    # 2026-11-18: usage telemetry for the remote (--backend litellm) client --
+    # pure observability (latency/token counts/throughput for the UNIL/CSCS
+    # service itself), unrelated to this run's actual results. The local
+    # TransformersClient has no print_stats(), so this is a no-op for the
+    # GPU path -- see src/client_remote.py's module docstring.
+    if hasattr(client, "print_stats"):
+        client.print_stats()
+
     return 0
 
 

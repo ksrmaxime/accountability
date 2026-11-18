@@ -72,27 +72,47 @@ model's full-vocabulary softmax. Two things to know this is fine for:
      vLLM-based servers, which litellm's CSCS backends almost certainly
      are, mirror this). A candidate letter not present in the returned
      top-20 simply never had enough probability mass to be useful
-     anyway for a well-calibrated 2-way question, but this has NOT been
-     empirically confirmed against litellm.dcsr.unil.ch as of this
-     writing -- scripts/check_remote_api.py checks this directly (both
-     candidate letters appearing, with sane-looking logprob values) and
-     MUST be run by hand, with a real API key, before trusting
-     logprob_many on any real pipeline step. A missing letter returns
-     NaN (same fail-safe convention as src/client.py's OOM skip) rather
-     than a silently wrong guess.
+     anyway for a well-calibrated 2-way question. CONFIRMED working
+     against swiss-ai/Apertus-v1.5-70B via scripts/check_remote_api.py
+     on 2026-11-18 (both letters present in both letter orderings, and
+     the model's actual answer was consistent across the order-swap --
+     a good sign for the de-biasing trick this pipeline relies on
+     everywhere). Still worth re-running that check for any OTHER model
+     tried through this client -- a missing letter returns NaN (same
+     fail-safe convention as src/client.py's OOM skip) rather than a
+     silently wrong guess.
 
 API key handling: never hardcoded here or in any committed sbatch
-script. Read from an environment variable (--api_key_env, default
-UNIL_LITELLM_API_KEY) that the operator exports in their own shell
-before launching -- raises immediately and clearly if it's unset,
-rather than sending an unauthenticated request and failing confusingly
-downstream.
+script. Loaded via python-dotenv's load_dotenv() from a gitignored .env
+file at the repo root (see .env.example) -- same convention as
+src/download_src.py's existing SWISSDOX_API_KEY/SWISSDOX_API_SECRET.
+Raises immediately and clearly if the key is missing, rather than
+sending an unauthenticated request and failing confusingly downstream.
+
+Usage telemetry (2026-11-18, added at Maxime's request -- he is, in his
+own words, "beta testing" this UNIL/CSCS service and wants to come away
+with real numbers on latency/throughput/token volume, independent of
+whatever this specific pipeline run's own results turn out to be): every
+request made through this client is counted, by kind ("chat" for
+chat_many, "logprob" for logprob_many), tracking request count, retries,
+failures, prompt/completion/total tokens (read from the standard OpenAI
+"usage" field the server returns), and per-request latency. A short
+progress line prints every --progress_every successful requests (so a
+long sbatch .out log shows live throughput, not just a result at the
+very end), and print_stats() prints a full summary -- called
+automatically at the end of every pipeline step that builds its client
+via src/client.build_client() (see that function's call sites). None of
+this affects the pipeline's actual results in any way -- it is pure
+observability, kept entirely separate from chat_many/logprob_many's
+return values.
 """
 from __future__ import annotations
 
 import os
 import random
+import threading
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List
@@ -112,7 +132,17 @@ class RemoteAPIConfig:
                                          # 2026-11-18, so this errs conservative.
     max_retries: int = 5
     request_timeout: float = 120.0
-    top_logprobs: int = 20               # OpenAI spec max -- see module docstring.
+    top_logprobs: int = 20              # OpenAI spec max -- see module docstring.
+    progress_every: int = 25            # print a running stats line every N
+                                         # successful requests (0 disables it,
+                                         # print_stats() at the end still works).
+
+
+_EMPTY_KIND_STATS = {
+    "n": 0, "n_retried": 0, "retries": 0, "n_failed": 0,
+    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+    "latency_s": 0.0,
+}
 
 
 class RemoteAPIClient:
@@ -145,6 +175,12 @@ class RemoteAPIClient:
         })
         self._url = cfg.api_base.rstrip("/") + "/chat/completions"
 
+        # --- Usage telemetry (see module docstring) ---
+        self._stats_lock = threading.Lock()
+        self._run_start = time.monotonic()
+        self._stats_by_kind: Dict[str, dict] = defaultdict(lambda: dict(_EMPTY_KIND_STATS))
+        self._n_done = 0  # successful requests, all kinds combined -- drives --progress_every
+
     # ------------------------------------------------------------------
     # Interface identical to TransformersClient.chat_many
     # ------------------------------------------------------------------
@@ -170,7 +206,7 @@ class RemoteAPIClient:
                 "temperature": float(temperature),
                 "max_tokens": int(max_new_tokens),
             }
-            resp = self._post_with_retry(payload)
+            resp = self._post_with_retry(payload, kind="chat")
             try:
                 return resp["choices"][0]["message"]["content"].strip()
             except (KeyError, IndexError, TypeError) as exc:
@@ -209,7 +245,7 @@ class RemoteAPIClient:
                 "logprobs": True,
                 "top_logprobs": self.cfg.top_logprobs,
             }
-            resp = self._post_with_retry(payload)
+            resp = self._post_with_retry(payload, kind="logprob")
             return self._extract_candidate_logprobs(resp, candidate_letters)
 
         with ThreadPoolExecutor(max_workers=self.cfg.concurrency) as pool:
@@ -246,7 +282,8 @@ class RemoteAPIClient:
         return result
 
     # ------------------------------------------------------------------
-    def _post_with_retry(self, payload: dict) -> dict:
+    def _post_with_retry(self, payload: dict, kind: str = "other") -> dict:
+        start = time.monotonic()
         last_exc: Exception | None = None
         for attempt in range(self.cfg.max_retries + 1):
             try:
@@ -254,7 +291,9 @@ class RemoteAPIClient:
                 if r.status_code == 429 or r.status_code >= 500:
                     raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:300]}")
                 r.raise_for_status()
-                return r.json()
+                resp = r.json()
+                self._record_success(kind, attempt, time.monotonic() - start, resp)
+                return resp
             except requests.RequestException as exc:
                 last_exc = exc
                 if attempt == self.cfg.max_retries:
@@ -268,4 +307,104 @@ class RemoteAPIClient:
                     flush=True,
                 )
                 time.sleep(sleep_s)
+        with self._stats_lock:
+            self._stats_by_kind[kind]["n_failed"] += 1
         raise RuntimeError(f"Request failed after {self.cfg.max_retries} retries: {last_exc}")
+
+    # ------------------------------------------------------------------
+    # Usage telemetry -- see module docstring. Pure observability, never
+    # read by chat_many/logprob_many's own return values.
+    # ------------------------------------------------------------------
+    def _record_success(self, kind: str, attempt: int, latency_s: float, resp: dict) -> None:
+        usage = resp.get("usage") or {}
+        pt = usage.get("prompt_tokens") or 0
+        ct = usage.get("completion_tokens") or 0
+        tt = usage.get("total_tokens") or (pt + ct)
+        with self._stats_lock:
+            s = self._stats_by_kind[kind]
+            s["n"] += 1
+            if attempt > 0:
+                s["n_retried"] += 1
+            s["retries"] += attempt
+            s["latency_s"] += latency_s
+            s["prompt_tokens"] += pt
+            s["completion_tokens"] += ct
+            s["total_tokens"] += tt
+            self._n_done += 1
+            n_done = self._n_done
+        if self.cfg.progress_every and n_done % self.cfg.progress_every == 0:
+            self._print_progress(n_done)
+
+    def _print_progress(self, n_done: int) -> None:
+        elapsed = time.monotonic() - self._run_start
+        with self._stats_lock:
+            total_tokens = sum(s["total_tokens"] for s in self._stats_by_kind.values())
+        rate = total_tokens / elapsed if elapsed > 0 else 0.0
+        print(
+            f"[remote-api progress] {n_done} requests done | {elapsed:.0f}s elapsed | "
+            f"{total_tokens:,} tokens so far | ~{rate:.1f} tok/s (wall-clock, "
+            f"concurrency={self.cfg.concurrency})",
+            flush=True,
+        )
+
+    def print_stats(self) -> None:
+        """Full usage summary -- call once, typically at the end of a
+        pipeline step's main(). Safe to call even if zero requests were
+        made (e.g. an empty input). Purely informational: this is beta-test
+        telemetry for the UNIL/CSCS service, unrelated to the pipeline's
+        actual results."""
+        elapsed = time.monotonic() - self._run_start
+        with self._stats_lock:
+            snapshot = {k: dict(v) for k, v in self._stats_by_kind.items()}
+
+        print("=== RemoteAPIClient usage stats (beta-test telemetry -- unrelated to pipeline results) ===", flush=True)
+        print(f"  model={self.cfg.model} api_base={self.cfg.api_base} concurrency={self.cfg.concurrency}", flush=True)
+        print(f"  wall-clock elapsed since client creation: {elapsed:.1f}s", flush=True)
+
+        if not snapshot:
+            print("  No requests were made.", flush=True)
+            return
+
+        grand = dict(_EMPTY_KIND_STATS)
+        for kind in sorted(snapshot):
+            s = snapshot[kind]
+            for k in grand:
+                grand[k] += s[k]
+            print(
+                f"  [{kind}] requests={s['n']} (retried={s['n_retried']}, "
+                f"total_retries={s['retries']}, failed={s['n_failed']})",
+                flush=True,
+            )
+            if s["n"]:
+                print(
+                    f"           tokens: prompt={s['prompt_tokens']:,} "
+                    f"completion={s['completion_tokens']:,} total={s['total_tokens']:,} | "
+                    f"avg_latency={s['latency_s'] / s['n']:.2f}s/request",
+                    flush=True,
+                )
+
+        print(
+            f"  [ALL KINDS] requests={grand['n']} (retried={grand['n_retried']}, "
+            f"total_retries={grand['retries']}, failed={grand['n_failed']})",
+            flush=True,
+        )
+        if grand["n"]:
+            print(
+                f"              tokens: prompt={grand['prompt_tokens']:,} "
+                f"completion={grand['completion_tokens']:,} total={grand['total_tokens']:,} | "
+                f"avg_latency={grand['latency_s'] / grand['n']:.2f}s/request",
+                flush=True,
+            )
+        if elapsed > 0 and grand["total_tokens"]:
+            print(
+                f"  Effective throughput (wall-clock, accounts for concurrency="
+                f"{self.cfg.concurrency}): {grand['total_tokens'] / elapsed:.1f} tok/s total, "
+                f"{grand['completion_tokens'] / elapsed:.1f} tok/s completion-only",
+                flush=True,
+            )
+        elif grand["n"] and not grand["total_tokens"]:
+            print(
+                "  No token usage reported by the server (the 'usage' field was missing or "
+                "empty in every response) -- cannot compute throughput from this run.",
+                flush=True,
+            )

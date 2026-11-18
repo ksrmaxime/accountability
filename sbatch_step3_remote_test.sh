@@ -64,7 +64,7 @@ WORKDIR=/work/FAC/FDCA/IDHEAP/mhinterl/parp/ACCOUNTABILITY_REPO
 # python process below -- see src/client_remote.py's module docstring).
 
 # I/O
-INPUT=${1:-"$(cat "${WORKDIR}/data/processed/.last_step2" 2>/dev/null || echo "${WORKDIR}/data/processed/step2_clean.parquet")"}
+INPUT=${1:-"$(cat "${WORKDIR}/data/processed/.last_step2" 2>/dev/null || echo "${WORKDIR}/data/processed/step2_clean_GOLD800.parquet")"}
 OUTPUT_BASE=${WORKDIR}/data/output/step3_remote
 TEXT_COL=text
 N_ROWS=0        # 0 = toutes les lignes ; mettre ex. 20 pour un essai rapide avant le run complet

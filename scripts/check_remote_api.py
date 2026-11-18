@@ -115,6 +115,9 @@ def main() -> int:
             print(f"  order={order} FAIL -- {exc!r}")
             logprob_ok = False
 
+    print()
+    client.print_stats()
+
     print("\n=== SUMMARY ===")
     print(f"  chat_many:    {'PASS' if chat_ok else 'FAIL'}")
     print(f"  logprob_many: {'PASS' if logprob_ok else 'FAIL'}")
