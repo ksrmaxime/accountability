@@ -50,7 +50,7 @@ forward pass (never a generation loop). An OpenAI-compatible chat
 endpoint has no equivalent concept -- the closest thing it exposes is
 chat.completions' logprobs/top_logprobs parameters, which return the
 FIRST GENERATED TOKEN's top-N (token, log-probability) pairs under the
-model's full-vocabulary softmax. Two things to know this is fine for:
+model's full-vocabulary softmax. Three things to know about this:
 
   1. Units: downstream code (src/step4b_logit_utils.softmax_restricted)
      computes a 2-way softmax restricted to exactly the 2 candidate
@@ -81,6 +81,26 @@ model's full-vocabulary softmax. Two things to know this is fine for:
      tried through this client -- a missing letter returns NaN (same
      fail-safe convention as src/client.py's OOM skip) rather than a
      silently wrong guess.
+
+  3. CAVEAT specific to "-thinking" model variants (e.g.
+     swiss-ai/Apertus-v1.5-70B-thinking), added 2026-11-18: logprob_many
+     requests max_tokens=1 and reads the logprobs of THAT single
+     generated token. This is only meaningful if the first token the
+     model generates is already part of its real answer. A model that
+     always emits an internal chain-of-thought block before its answer
+     would instead return, as "the first token", the start of that
+     reasoning -- and a candidate letter could still coincidentally show
+     up somewhere in that token's top_logprobs (point 2 above would
+     still technically "pass"), while being completely meaningless as a
+     measure of the model's actual answer probability. This client does
+     NOT attempt to detect or work around that on its own (it has no way
+     to know, from here, whether a given model/proxy combination
+     reasons before answering, or whether the proxy exposes a way to
+     turn that off for a single call). See raw_request() below and
+     scripts/check_remote_api.py's thinking-mode structure probe, which
+     checks this explicitly before any "-thinking" model is trusted with
+     a logit-probing pass (step3 validation, step4a pass3, step4b
+     category classification).
 
 API key handling: never hardcoded here or in any committed sbatch
 script. Loaded via python-dotenv's load_dotenv() from a gitignored .env
@@ -218,7 +238,8 @@ class RemoteAPIClient:
     # ------------------------------------------------------------------
     # Interface identical to TransformersClient.logprob_many -- see module
     # docstring for why log-probabilities instead of raw logits is exact,
-    # not an approximation.
+    # not an approximation. See also the module docstring's CAVEAT #3 on
+    # "-thinking" model variants before trusting this for one.
     # ------------------------------------------------------------------
     def logprob_many(
         self,
@@ -241,7 +262,10 @@ class RemoteAPIClient:
                 "temperature": 0.0,
                 "max_tokens": 1,  # only the first generated token's distribution
                                   # is needed -- same "single forward pass" intent
-                                  # as the local backend's logprob_many.
+                                  # as the local backend's logprob_many. See module
+                                  # docstring CAVEAT #3: this assumes the first
+                                  # generated token is already the real answer,
+                                  # which can be false for "-thinking" variants.
                 "logprobs": True,
                 "top_logprobs": self.cfg.top_logprobs,
             }
@@ -310,6 +334,21 @@ class RemoteAPIClient:
         with self._stats_lock:
             self._stats_by_kind[kind]["n_failed"] += 1
         raise RuntimeError(f"Request failed after {self.cfg.max_retries} retries: {last_exc}")
+
+    # ------------------------------------------------------------------
+    # Diagnostic escape hatch -- 2026-11-18, added for
+    # scripts/check_remote_api.py's thinking-mode structure probe (see
+    # module docstring CAVEAT #3). Sends a raw, caller-built payload
+    # through the exact same retry/stats machinery as chat_many/
+    # logprob_many, but returns the FULL, unparsed JSON response instead
+    # of extracting just the text or just the candidate logprobs --
+    # needed to inspect things chat_many/logprob_many deliberately throw
+    # away (e.g. a "reasoning_content" field, or exactly what token a
+    # max_tokens=1 call actually produced). Not used by any pipeline
+    # step itself; only by diagnostic tooling.
+    # ------------------------------------------------------------------
+    def raw_request(self, payload: dict, kind: str = "diag") -> dict:
+        return self._post_with_retry(payload, kind=kind)
 
     # ------------------------------------------------------------------
     # Usage telemetry -- see module docstring. Pure observability, never
