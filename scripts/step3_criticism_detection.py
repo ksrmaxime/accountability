@@ -144,6 +144,18 @@ from src.step3_prompts import (
     VERIFY_SYSTEM_PROMPT, build_verify_prompt,
     FORCE_SYSTEM_PROMPT, build_force_prompt,
 )
+# 2026-11-19: --backend litellm (remote API models via the UNIL/CSCS proxy,
+# e.g. the Apertus-70B family) uses its OWN prompt module
+# (src/step3_prompts_remote.py), selected right after argparse below. This
+# keeps any prompt experiment on the remote backend from ever touching the
+# src/step3_prompts.py import above, which the production vllm/transformers
+# (8B, local GPU) path depends on untouched -- see
+# src/step3_prompts_remote.py's module docstring for why and what, if
+# anything, differs from it.
+from src.step3_prompts_remote import (
+    SYSTEM_PROMPT as SYSTEM_PROMPT_REMOTE, build_user_prompt as build_user_prompt_remote,
+    FORCE_SYSTEM_PROMPT as FORCE_SYSTEM_PROMPT_REMOTE, build_force_prompt as build_force_prompt_remote,
+)
 from src.step3_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
 from src.step3_logit_prompts import (
@@ -318,6 +330,21 @@ def main() -> int:
     if len(candidate_letters) != 2:
         raise ValueError(f"--candidate_letters must give exactly 2 letters, got {candidate_letters!r}")
 
+    # 2026-11-19: pick the prompt module for pass 1 (and its force fallback)
+    # based on --backend -- see the src/step3_prompts_remote import above.
+    # vllm/transformers (the production 8B/local-GPU path) keep using
+    # src/step3_prompts.py exactly as before, byte-for-byte unaffected.
+    if args.backend == "litellm":
+        active_system_prompt = SYSTEM_PROMPT_REMOTE
+        active_build_user_prompt = build_user_prompt_remote
+        active_force_system_prompt = FORCE_SYSTEM_PROMPT_REMOTE
+        active_build_force_prompt = build_force_prompt_remote
+    else:
+        active_system_prompt = SYSTEM_PROMPT
+        active_build_user_prompt = build_user_prompt
+        active_force_system_prompt = FORCE_SYSTEM_PROMPT
+        active_build_force_prompt = build_force_prompt
+
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
         task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
@@ -402,9 +429,9 @@ def main() -> int:
         df=working,
         cfg=draft_cfg,
         client=client,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=active_system_prompt,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
-        build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+        build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
         parse_fn=parse_draft_output,
         output_cols=DRAFT_COLS,
         skip_if_already_filled="keyword_answer_draft",
@@ -441,9 +468,9 @@ def main() -> int:
             df=working,
             cfg=retry_cfg,
             client=client,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=active_system_prompt,
             select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["keyword_answer_draft"].isna(),
-            build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+            build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
             parse_fn=parse_draft_output,
             output_cols=DRAFT_COLS,
             skip_if_already_filled="keyword_answer_draft",
@@ -489,9 +516,9 @@ def main() -> int:
             df=working,
             cfg=force_cfg,
             client=client,
-            system_prompt=FORCE_SYSTEM_PROMPT,
+            system_prompt=active_force_system_prompt,
             select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["keyword_answer_draft"].isna(),
-            build_prompt_fn=lambda row, col: build_force_prompt(row, col),
+            build_prompt_fn=lambda row, col: active_build_force_prompt(row, col),
             parse_fn=parse_force_output,
             output_cols=ALL_COLS,
             skip_if_already_filled="keyword_answer_draft",

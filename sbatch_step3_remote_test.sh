@@ -75,7 +75,7 @@ TEXT_COL=text
 N_ROWS=0        # 0 = toutes les lignes ; mettre ex. 20 pour un essai rapide avant le run complet
 
 # Model / backend
-MODEL_PATH=${2:-"swiss-ai/Apertus-v1.5-70B-thinking"}
+MODEL_PATH=${2:-"swiss-ai/Apertus-v1.5-70B"}
 BACKEND=litellm
 API_BASE=${API_BASE:-"https://litellm.dcsr.unil.ch/v1"}
 API_KEY_ENV=UNIL_LITELLM_API_KEY
