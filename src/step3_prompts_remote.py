@@ -8,114 +8,127 @@ proxy) against the GOLD800 sample (job20650690, job20654710) and finding
 the exact same error signature on BOTH remote models: strong precision
 (0.84-0.92), weak recall (0.36-0.47), and a dominant false-negative shape
 (~90 of ~800 rows) where the model's own justification explicitly reasons
-itself out of a YES despite real criticism being present -- see the
-conversation's qualitative breakdown of job20650690's 89 false negatives
-for the full pattern tally.
+itself out of a YES despite real criticism being present.
 
 WHY THIS IS A SEPARATE FILE, not an edit to src/step3_prompts.py: that
 file's own module docstring documents a dozen-plus rounds of pass-1
 prompt tuning on the production vllm/transformers (8B, local GPU) path
 since 2026-09-29, several explicitly reverted after measuring net-negative
-on the real gold set (see its 2026-09-29/30, 2026-10-01, 2026-10-12
-entries) because of what that docstring calls a "non-local recalibration
-effect" -- loosening the definition to catch one missed pattern reliably
-creates new false positives elsewhere, since the SAME instruction block
-governs every row. Maxime's access to the UNIL/CSCS proxy is personal and
-may not last, so src/step3_prompts.py (and its sibling
-src/step3_logit_prompts.py) must stay exactly as they are: whatever is
-tried here must never put the proven, extensively-tuned production
-8B/local-GPU wording at risk. scripts/step3_criticism_detection.py now
+on the real gold set, because of what that docstring calls a "non-local
+recalibration effect" -- loosening the definition to catch one missed
+pattern reliably creates new false positives elsewhere, since the SAME
+instruction block governs every row. Maxime's access to the UNIL/CSCS
+proxy is personal and may not last, so src/step3_prompts.py (and its
+sibling src/step3_logit_prompts.py) must stay exactly as they are:
+whatever is tried here must never put the proven, extensively-tuned
+production 8B/local-GPU wording at risk. scripts/step3_criticism_detection.py
 picks this module instead of src/step3_prompts.py specifically when
---backend litellm is used (see that script's own 2026-11-19 entry) --
-every other backend (vllm/transformers) is completely unaffected, byte-
-for-byte, by anything in this file.
+--backend litellm is used -- every other backend (vllm/transformers) is
+completely unaffected, byte-for-byte, by anything in this file.
 
-BASELINE: SYSTEM_PROMPT, USER_TEMPLATE (its first 10 worked examples,
-in the same order and wording), build_user_prompt, FORCE_SYSTEM_PROMPT,
-FORCE_USER_TEMPLATE, build_force_prompt, VERIFY_SYSTEM_PROMPT,
-VERIFY_USER_TEMPLATE and build_verify_prompt are copied VERBATIM from
-src/step3_prompts.py as it stood after that file's 2026-10-13 entry (the
-version actually used, unmodified, for every remote-backend run analysed
-so far, since build_client()/step3_criticism_detection.py previously had
-no remote-specific prompt at all). This file does not re-derive or
-re-litigate any of that wording's own history -- see src/step3_prompts.py
-for the full changelog behind it. VERIFY_* and the plain FORCE prompt are
-kept here only for interface parity with that file (the detection script
-never actually calls pass 2, same as the production path); they are not
-touched or reasoned about below.
+2026-11-19, first revision: added a balanced pair of worked examples
+(11-12) targeting one specific false-negative shape (a department's own
+political leadership blamed for a management/leadership failure, with the
+department's name never in the same sentence as the fault -- e.g. "VBS's
+decisions, overseen by Amherd, were misguided"). Measured on job20762627
+against the job20650690 baseline (same model, same GOLD800 sample):
+draft precision 0.842->0.786, recall 0.473->0.544, F1 0.606->0.643;
+after validation, precision 0.924->0.868, recall 0.361->0.468, F1
+0.519->0.608 -- a real, targeted win (17/89 of the original false
+negatives flipped correctly, concentrated almost exactly on the intended
+DDPS/VBS and SRC/NDB leadership-attribution cases), for a modest and
+favourable (not runaway) precision cost.
 
-THE ONE CHANGE, added here and here only: a new, balanced pair of worked
-examples (11-12) in USER_TEMPLATE, targeting a specific false-negative
-shape that is NOT covered by any of the existing 10 examples and was NOT
-among the patterns any of the already-reverted production-path tuning
-rounds targeted (see src/step3_prompts.py's history and
-src/step3_logit_prompts.py's ADMIN_UNIT_CAUTION entry -- that one tried
-to make the model MORE cautious on administrative/departmental targets to
-cut false positives; this is the opposite direction, aimed at recall, on
-a pattern that attempt never addressed):
+2026-11-23, full rewrite of the governing definition (SYSTEM_PROMPT and
+USER_TEMPLATE's framing paragraphs only -- see below): a follow-up
+justification analysis of job20762627's remaining 77 false negatives
+found the SAME dominant failure shape persisting even after the above fix
+-- 73% of them still read almost verbatim as "does not attribute fault,
+blame, failure, or wrongdoing directly to X itself", including cases
+(project/policy managed by the entity, reported third-party criticism)
+that worked examples 1 and 2 already illustrate. That is: the problem is
+not primarily missing examples, it is the governing definition itself
+(SYSTEM_PROMPT's "Only answer YES if the article itself attributes fault,
+blame, failure, or wrongdoing DIRECTLY to this specific entity") training
+the model to demand an explicit, direct, blame-shaped accusation and
+discount anything reported, indirect, or phrased as a setback/
+controversy/disputed outcome rather than a verdict of fault.
 
-  A department/ministry's own named political leadership (a minister, a
-  director) is blamed for a management or leadership failure, and the
-  article never uses the department's own name in the same sentence as
-  the fault -- e.g. "VBS's decisions, overseen by Amherd, were misguided"
-  or "the department's reorganization, led by its minister, caused
-  chaos". On job20650690/job20654710, roughly a quarter of false
-  negatives (22 of 89, and a comparable share of the thinking model's 93)
-  read almost exactly like this, with justifications explicitly drawing a
-  "leadership vs. the institution itself" line that none of the existing
-  10 examples addresses one way or the other.
+At Maxime's explicit request, this revision tests a different hypothesis:
+a 70B-class model may not need a narrow, heavily operationalised
+definition the way the original wording (tuned against the local 8B,
+which needed a tight, literal rule to avoid freewheeling into false
+positives) does -- a larger model may be able to apply a broader, more
+naturally-worded definition of "criticism" (explicitly covering direct,
+reported, and indirect criticism; explicitly covering the entity's own
+conduct, its management/leadership, and positions or policies it
+proposed, defended, or carried out politically) without the same
+precision collapse the production-path's own past broadening attempts
+suffered on the 8B. SYSTEM_PROMPT and USER_TEMPLATE's framing paragraphs
+are rewritten below to state that broader definition directly, instead of
+accumulating more worked examples around the old narrow one.
 
-Example 11 (new, YES) establishes that a department's own leadership
-making a management decision about the department's own internal affairs
-IS the department's own responsibility, under the same "direct
-responsibility" logic example 1 already uses for a project the ministry
-runs. Example 12 (new, NO) is the deliberately paired contrast, carried
-over from the same "always calibrate both directions at once" discipline
-src/step3_prompts.py's own 2026-10-02 entry describes: a minister's
-UNRELATED personal conduct (nothing to do with running the department)
-must NOT transfer to the department, guarding against exactly the kind of
-over-broad swing that sank several of the production-path's own past
-attempts.
+Per Maxime's explicit instruction, the worked examples themselves
+(1-12, i.e. the original 10 plus the leadership pair added 2026-11-19)
+are LEFT UNCHANGED, verbatim, same order, same wording -- only the
+SYSTEM_PROMPT and the two framing paragraphs immediately before "For
+example:" in USER_TEMPLATE were rewritten. All 12 examples remain valid
+illustrations under the new, broader wording (none of the YES examples
+needs a broader rule to justify them, and none of the NO examples relies
+on excluding indirect/reported criticism -- they exclude on other
+grounds: wrong direction, neutral fact, unrelated personal conduct, the
+entity's own risk disclosure, or someone else being the actual target).
 
-STATUS: UNTESTED as of creation. The plan is to re-run the 800-row
-GOLD800 remote test (swiss-ai/Apertus-v1.5-70B, --backend litellm) with
-this prompt and compare against the already-measured baseline for that
-exact model/sample (job20650690: accuracy=87.0%, precision=0.842,
-recall=0.473, F1=0.606 on keyword_answer_draft) before deciding whether
-to keep, iterate further, or revert this one addition -- the same
-measure-before-trusting discipline documented throughout
-src/step3_prompts.py and src/step3_logit_prompts.py. Do not assume this
-helps until that comparison has actually been run.
+STATUS: UNTESTED as of this rewrite. The plan is the same discipline as
+every prior change here: re-run the 800-row GOLD800 remote test
+(swiss-ai/Apertus-v1.5-70B, --backend litellm) and compare against the
+job20762627 baseline just above (draft: acc=87.25%, precision=0.786,
+recall=0.544, F1=0.643) before deciding whether this broader definition
+is a net improvement, a net regression (i.e. the precision collapse the
+8B always suffered from broadening, now happening on the 70B too), or
+a wash. Do not assume either outcome until that comparison has actually
+been run.
 """
 from __future__ import annotations
 import pandas as pd
 
-# --- Verbatim from src/step3_prompts.py -- see that file for the tuning
-# history behind this exact wording. Not touched here. ---
+# --- 2026-11-23: rewritten to state a broader definition of criticism
+# directly (direct, reported, indirect; behaviour, management, political
+# proposals) -- see module docstring for the full rationale and the
+# baseline this is measured against. The 12 worked examples below this
+# point are UNCHANGED from the previous (2026-11-19) revision. ---
 SYSTEM_PROMPT = """\
 You are a media analysis assistant specialised in Swiss public affairs.
 You read a newspaper article and judge whether one specific, named entity
-is criticized in it. Be careful to distinguish an entity being criticized
-from an entity that is itself doing the criticizing, or one that is simply
-mentioned in a neutral or unrelated context. Only answer YES if the article
-itself attributes fault, blame, failure, or wrongdoing directly to this
-specific entity: an entity that merely faces a difficult or negative
-situation, carries out its normal role, is cited as a neutral source,
-states its own position or decision, or is mentioned near criticism that
-explicitly targets a different, specific person, institution, or policy,
-is not itself being criticized.\
+is itself the target of criticism in it. Criticism can take several forms:
+a direct reproach stated in the article's own narration, a criticism
+reported from or attributed to someone else (a journalist, an official, an
+expert, a political opponent, an auditor, members of the public, and so
+on), or an indirect criticism conveyed by describing a failure, a
+shortcoming, a controversy, a setback, a reversal, or a disputed outcome
+that reflects on the entity -- it does not need to use words like "fault"
+or "blame" to count. Criticism can concern the entity's own conduct or
+behaviour, how it manages or leads itself or what it runs, a decision it
+made, or a position, measure, or policy it proposed, defended, or carried
+out politically. Be careful, however, to distinguish an entity being
+criticized from an entity that is itself doing the criticizing of someone
+or something else, or one that is simply mentioned in a neutral or
+unrelated context: the criticism must concern this specific entity itself
+-- for what it is, does, decided, manages, or proposed -- and not a
+different, specific person, institution, or policy that merely happens to
+be mentioned nearby.\
 """
 
-# --- USER_TEMPLATE: examples 1-10 verbatim from src/step3_prompts.py.
-# Examples 11-12 are NEW -- see module docstring. Everything else
-# (framing, closing instruction) is unchanged. ---
+# --- USER_TEMPLATE: framing paragraphs rewritten 2026-11-23 (see module
+# docstring); the 12 worked examples below and the closing instruction are
+# UNCHANGED, verbatim, from the previous (2026-11-19) revision. ---
 USER_TEMPLATE = """\
 In the article below, focus specifically on "{keyword}".
 
 ARTICLE:
 {article_text}
 
-Your task is to determine whether "{keyword}" ITSELF is being criticized in this article -- for who it is or what it did or decided. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
+Your task is to determine whether "{keyword}" ITSELF is the target of criticism in this article. That criticism can be direct, reported from someone else, or conveyed indirectly through a failure, a controversy, a setback, or a disputed outcome -- it does not need to be worded as an explicit accusation to count, and it can concern "{keyword}"'s own conduct or behaviour, its management or leadership, a decision it made, or a position, measure, or policy it proposed, defended, or carried out politically. Criticism can be present even if the article's overall tone is neutral or positive elsewhere.
 
 Do not confuse this with a case where "{keyword}" is the one expressing criticism of someone or something else, or is only mentioned in passing -- neither of those counts as "{keyword}" being criticized.
 
