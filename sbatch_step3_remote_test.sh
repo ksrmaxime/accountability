@@ -114,6 +114,18 @@ VALIDATION_CHECKPOINT_EVERY=200
 VALIDATION_INPUT=${VALIDATION_INPUT:-justification}
 VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD:-0.30}
 SKIP_VALIDATION=${SKIP_VALIDATION:-0}
+# 2026-11-24: --validation_scope/--validation_threshold_no_to_yes, added to
+# scripts/step3_criticism_detection.py to also re-check pass 1's NO rows
+# (see that script's own --validation_scope argparse help for the full
+# rationale). VALIDATION_SCOPE defaults to "yes_only" -- byte-identical to
+# every prior run of this sbatch script -- so set VALIDATION_SCOPE=all (env
+# var) to turn this on. VALIDATION_THRESHOLD_NO_TO_YES is left EMPTY by
+# default, which means "all" scope only RECORDS p_true for NO rows without
+# promoting any of them to YES -- do not set a value here until a p_true
+# sweep against gold has picked one (see that argparse help again); only
+# set it (env var) once you have that number.
+VALIDATION_SCOPE=${VALIDATION_SCOPE:-yes_only}
+VALIDATION_THRESHOLD_NO_TO_YES=${VALIDATION_THRESHOLD_NO_TO_YES:-}
 
 # =============================================================================
 
@@ -142,11 +154,21 @@ echo "BACKEND=${BACKEND} | MODEL_PATH=${MODEL_PATH} | API_BASE=${API_BASE} | CON
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
-echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT} | VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD}"
+echo "CANDIDATE_LETTERS=${CANDIDATE_LETTERS} | VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION} | VALIDATION_INPUT=${VALIDATION_INPUT} | VALIDATION_THRESHOLD=${VALIDATION_THRESHOLD} | VALIDATION_SCOPE=${VALIDATION_SCOPE} | VALIDATION_THRESHOLD_NO_TO_YES=${VALIDATION_THRESHOLD_NO_TO_YES:-<unset>}"
 
 SKIP_VALIDATION_FLAG=()
 if [[ "${SKIP_VALIDATION}" == "1" ]]; then
     SKIP_VALIDATION_FLAG=(--skip_validation)
+fi
+
+# 2026-11-24: only pass --validation_threshold_no_to_yes through when it was
+# actually set (env var) -- the python script's own default (None) is what
+# makes --validation_scope=all a safe, result-changing-nothing "record only"
+# run, so an accidentally-empty-but-passed value must not turn into "0.0" or
+# a parse error.
+VALIDATION_THRESHOLD_NO_TO_YES_FLAG=()
+if [[ -n "${VALIDATION_THRESHOLD_NO_TO_YES}" ]]; then
+    VALIDATION_THRESHOLD_NO_TO_YES_FLAG=(--validation_threshold_no_to_yes "${VALIDATION_THRESHOLD_NO_TO_YES}")
 fi
 
 python scripts/step3_criticism_detection.py \
@@ -174,9 +196,11 @@ python scripts/step3_criticism_detection.py \
   --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
   --validation_input        "$VALIDATION_INPUT" \
   --validation_threshold    "$VALIDATION_THRESHOLD" \
+  --validation_scope        "$VALIDATION_SCOPE" \
   --task_id 0 \
   --num_tasks 1 \
-  "${SKIP_VALIDATION_FLAG[@]}"
+  "${SKIP_VALIDATION_FLAG[@]}" \
+  "${VALIDATION_THRESHOLD_NO_TO_YES_FLAG[@]}"
 
 echo "Job finished."
 echo ""

@@ -101,18 +101,38 @@ model more skeptical on these targets. Fully reverted -- single p0
 calibration restored below, ADMIN_UNIT_CAUTION/needs_admin_caution removed
 from src/step3_logit_prompts.py.
 
+2026-11-24: --validation_scope (default "yes_only", byte-identical to every
+prior run) can be set to "all" to additionally run this SAME validation
+question against every non-forced NO row's own keyword_justification, not
+just YES rows -- see --validation_scope's own argparse help for the full
+rationale (job20870226's p_true overlap finding + the self-contradiction
+read) and --validation_threshold_no_to_yes for the (separate, opt-in)
+NO->YES promotion cutoff. Nothing in src/step3_logit_prompts.py is touched
+or forked for this -- it is purely a scoping change in this script, off by
+default.
+
 Output columns: keyword_answer                   -> "YES" | "NO" | NA   (FINAL -- possibly
-                                                       flipped to NO by the validation pass)
+                                                       flipped to NO by the validation pass, or,
+                                                       with --validation_scope=all and
+                                                       --validation_threshold_no_to_yes set,
+                                                       promoted from NO to YES)
                 keyword_answer_draft              -> "YES" | "NO" | NA   (pass 1)
                 keyword_justification             -> free text | NA      (pass 1)
-                keyword_answer_before_validation  -> "YES" | NA  (pass 1's own verdict, before
-                                                       the validation pass touched it -- only
-                                                       set for rows the validation pass actually
-                                                       looked at)
-                keyword_answer_validation_p_true  -> calibrated P(pass 1's YES is correct), or NA
-                keyword_answer_validated          -> "TRUE" | "FALSE" | NA (NA = not eligible for
+                keyword_answer_before_validation  -> "YES" | "NO" | NA  (pass 1's own verdict,
+                                                       before the validation pass touched it --
+                                                       only set for rows the validation pass
+                                                       actually looked at; "NO" only occurs with
+                                                       --validation_scope=all)
+                keyword_answer_validation_p_true  -> calibrated P(the justification supports a
+                                                       YES verdict), or NA -- computed the same
+                                                       way regardless of whether pass 1 said YES
+                                                       or NO
+                keyword_answer_validated          -> "TRUE" | "FALSE" | NA (TRUE iff the FINAL
+                                                       keyword_answer for this row is "YES" after
+                                                       validation; NA = not eligible for
                                                        validation, or an inconclusive read --
-                                                       fail-safe: pass 1's YES is kept either way)
+                                                       fail-safe: pass 1's own answer is kept
+                                                       either way)
 
 Usage
 -----
@@ -317,6 +337,43 @@ def main() -> int:
                     "(possibly forced) answer for every row. Kept as a flag from day one, "
                     "having learned from step4b's pass 3 that a validation pass needs to be "
                     "easy to turn off without touching code if it measures net-negative.")
+    ap.add_argument("--validation_scope", default="yes_only", choices=["yes_only", "all"],
+                    help="2026-11-24: which pass-1 rows the validation pass re-checks. "
+                    "'yes_only' (DEFAULT, byte-identical to every prior run) scopes it to rows "
+                    "pass 1 said YES to, exactly as designed on 2026-11-02 -- see this file's "
+                    "own module docstring and src/step3_logit_prompts.py's for why that scoping "
+                    "was a deliberate choice, not an oversight (a check that can only ever turn "
+                    "YES into NO cannot create a new false negative on a row pass 1 already got "
+                    "right). 'all' additionally re-checks every non-forced NO row's own "
+                    "keyword_justification the same way (same question, same logit-probing/"
+                    "order-swap/context-free-calibration machinery, same src/step3_logit_prompts.py "
+                    "content -- nothing in that file is touched or forked for this), recording "
+                    "keyword_answer_validation_p_true for those rows too. Added at Maxime's "
+                    "request after job20870226 (--backend litellm, the broadened remote prompt) "
+                    "showed the validation pass's own p_true could not separate the 34 true "
+                    "positives it wrongly flipped to NO from the 46 false positives it correctly "
+                    "flipped (near-identical p_true distributions on the YES side), while a "
+                    "qualitative read of the 43 remaining false negatives found a third of them "
+                    "wrote a justification that already argues a YES case; 'all' lets the SAME "
+                    "strict, narrow classic definition this pass has always used act as a second, "
+                    "independent, skeptical read on those NO rows too, rather than treating pass "
+                    "1's NO as automatically final. Whether a NO row is actually PROMOTED to YES "
+                    "is controlled separately by --validation_threshold_no_to_yes -- by default "
+                    "'all' only RECORDS p_true for NO rows without flipping anything, so the "
+                    "right cutoff can be chosen by sweeping this run's own p_true against gold "
+                    "afterwards, the same way --validation_threshold's 0.30 was originally picked, "
+                    "instead of guessing a value upfront.")
+    ap.add_argument("--validation_threshold_no_to_yes", type=float, default=None,
+                    help="2026-11-24: decision cutoff on keyword_answer_validation_p_true for "
+                    "rows pass 1 answered NO (only consulted when --validation_scope=all). "
+                    "p_true >= this value promotes the row to YES; otherwise it stays NO. Left "
+                    "unset (None) by default -- in that case 'all' scope still computes and saves "
+                    "p_true for every NO row (for later offline threshold-sweeping against gold), "
+                    "but never promotes anything, so a run with --validation_scope=all and no "
+                    "value here changes NOTHING about the final keyword_answer column vs "
+                    "--validation_scope=yes_only; it only adds data. Set this only after that "
+                    "sweep has picked a value -- do not guess one a priori (see "
+                    "--validation_scope's own help for why).")
 
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
@@ -563,6 +620,7 @@ def main() -> int:
               "1's own (possibly forced) keyword_answer for every row, no validation forward "
               "passes run.", flush=True)
         n_val_rejected = 0
+        n_val_promoted = 0
         n_val_incomplete = 0
         n_val_candidates = 0
     else:
@@ -581,16 +639,24 @@ def main() -> int:
         # correctly mean "not forced", matching every other NA check this
         # script already does (e.g. keyword_answer_draft.isna()).
         not_forced = (working["keyword_answer_forced"] != "TRUE").fillna(True)
+        # 2026-11-24: --validation_scope=all additionally includes NO rows --
+        # see this file's own module docstring and --validation_scope's
+        # argparse help for the full rationale. Default ("yes_only") is
+        # byte-identical to every prior run.
+        if args.validation_scope == "all":
+            answer_mask = working["keyword_answer"].isin(["YES", "NO"])
+        else:
+            answer_mask = working["keyword_answer"] == "YES"
         validation_mask = (
             build_mask(working, text_col=args.text_col)
-            & (working["keyword_answer"] == "YES")
+            & answer_mask
             & not_forced
         )
         if args.validation_input == "justification":
             # 2026-11-06: this variant has nothing to validate against
             # without a real justification -- defensive guard, should
-            # already always be true for any non-forced YES row (pass 1
-            # never writes a YES without one; see parse_draft_output).
+            # already always be true for any non-forced row (pass 1 never
+            # writes YES or NO without one; see parse_draft_output).
             validation_mask = validation_mask & working["keyword_justification"].notna()
         validated_idx = working.index[validation_mask].tolist()
         n_val_candidates = len(validated_idx)
@@ -598,9 +664,15 @@ def main() -> int:
             "pass 1's own justification" if args.validation_input == "justification"
             else "the full article"
         )
-        print(f"[validation] Re-checking pass 1's YES verdict for {n_val_candidates:,} rows "
-              f"against {val_input_desc} (--validation_input={args.validation_input}, "
-              f"--validation_threshold={args.validation_threshold})...", flush=True)
+        scope_desc = (
+            "pass 1's YES verdict" if args.validation_scope == "yes_only"
+            else "BOTH pass 1's YES and NO verdicts"
+        )
+        print(f"[validation] Re-checking {scope_desc} for {n_val_candidates:,} rows "
+              f"against {val_input_desc} (--validation_scope={args.validation_scope}, "
+              f"--validation_input={args.validation_input}, "
+              f"--validation_threshold={args.validation_threshold}, "
+              f"--validation_threshold_no_to_yes={args.validation_threshold_no_to_yes})...", flush=True)
 
         if task_id is not None:
             validation_checkpoint_path = args.output_base + f"_task{task_id}_step3val_checkpoint.parquet"
@@ -693,10 +765,18 @@ def main() -> int:
         if val_todo:
             _save_val_checkpoint()
 
-        n_val_rejected = 0
+        n_val_rejected = 0   # YES -> NO flips (unchanged behaviour)
+        n_val_promoted = 0   # 2026-11-24: NO -> YES flips, only possible with
+                              # --validation_scope=all AND
+                              # --validation_threshold_no_to_yes set
         n_val_incomplete = 0
         for row_idx in validated_idx:
-            working.at[row_idx, "keyword_answer_before_validation"] = "YES"
+            # 2026-11-24: capture pass 1's OWN answer before this pass can
+            # touch it -- "YES" always before, now also "NO" when
+            # --validation_scope=all. (Previously hardcoded to "YES" since
+            # only YES rows were ever in validated_idx.)
+            original_answer = working.at[row_idx, "keyword_answer"]
+            working.at[row_idx, "keyword_answer_before_validation"] = original_answer
 
             p_yes_by_order = {}
             val_any_nan = False
@@ -717,7 +797,7 @@ def main() -> int:
                 val_any_nan = True
 
             if val_any_nan:
-                # Inconclusive read -- fail-safe: keep pass 1's own YES,
+                # Inconclusive read -- fail-safe: keep pass 1's own answer,
                 # don't swap on a signal we don't trust.
                 n_val_incomplete += 1
                 continue
@@ -725,15 +805,34 @@ def main() -> int:
             p_yes_corrected = calibrate(p_yes, p0)
             working.at[row_idx, "keyword_answer_validation_p_true"] = p_yes_corrected
 
-            if p_yes_corrected >= args.validation_threshold:
-                working.at[row_idx, "keyword_answer_validated"] = "TRUE"
+            if original_answer == "YES":
+                # Unchanged from every prior run: p_true >= threshold keeps
+                # pass 1's YES, otherwise flips it to NO.
+                if p_yes_corrected >= args.validation_threshold:
+                    working.at[row_idx, "keyword_answer_validated"] = "TRUE"
+                else:
+                    working.at[row_idx, "keyword_answer_validated"] = "FALSE"
+                    working.at[row_idx, "keyword_answer"] = "NO"
+                    n_val_rejected += 1
             else:
-                working.at[row_idx, "keyword_answer_validated"] = "FALSE"
-                working.at[row_idx, "keyword_answer"] = "NO"
-                n_val_rejected += 1
+                # 2026-11-24: original_answer == "NO", only reached with
+                # --validation_scope=all. p_true is ALWAYS recorded above;
+                # it is only ACTED on (promoted to YES) if an explicit
+                # --validation_threshold_no_to_yes was given -- see that
+                # flag's help for why this is opt-in rather than a guessed
+                # default.
+                if (args.validation_threshold_no_to_yes is not None
+                        and p_yes_corrected >= args.validation_threshold_no_to_yes):
+                    working.at[row_idx, "keyword_answer_validated"] = "TRUE"
+                    working.at[row_idx, "keyword_answer"] = "YES"
+                    n_val_promoted += 1
+                else:
+                    working.at[row_idx, "keyword_answer_validated"] = "FALSE"
 
         print(f"[validation] {n_val_rejected:,}/{n_val_candidates:,} rows rejected (flipped "
-              f"YES->NO) ({n_val_incomplete:,} validation reads inconclusive, pass 1's YES "
+              f"YES->NO); {n_val_promoted:,} rows promoted (flipped NO->YES, only possible "
+              f"with --validation_scope=all and --validation_threshold_no_to_yes set) "
+              f"({n_val_incomplete:,} validation reads inconclusive, pass 1's own answer "
               f"kept as-is for those)", flush=True)
 
         if Path(validation_checkpoint_path).exists():
@@ -773,6 +872,7 @@ def main() -> int:
         f"draft/final disagreement: {disagree:,}/{int(both.sum()):,} | "
         f"forced (no real verification): {forced:,} | "
         f"validation: {n_val_rejected:,}/{n_val_candidates:,} rejected, "
+        f"{n_val_promoted:,} promoted, "
         f"{n_val_incomplete:,} inconclusive)"
     )
 
