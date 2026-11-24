@@ -16,15 +16,56 @@ full tuning history -- the removed/reverted pass-2 validation-on-
 justification design, the 2026-11-17 "forced re-search" redesign, the
 2026-11-18 pass-3 coherence check, etc.).
 
-As of this creation, NO WORDING HAS BEEN CHANGED ANYWHERE BELOW: every
-prompt string (SYSTEM_PROMPT, the pass-2 "forced re-search"
-VERIFY_SYSTEM_PROMPT, FORCE_SYSTEM_PROMPT) and every worked example is
-byte-identical to src/step4a_prompts.py at the time of this duplication --
-only this module-level docstring (documentation, not prompt content) was
-written fresh, replacing that file's own tuning-history docstring, which
-documents a history specific to that file and not (yet) to this one. This
-is intentionally just a safe, isolated starting point for later remote-
-specific tuning, not a tuning pass itself.
+At creation, NO WORDING HAD BEEN CHANGED ANYWHERE BELOW: every prompt
+string (SYSTEM_PROMPT, the pass-2 "forced re-search" VERIFY_SYSTEM_PROMPT,
+FORCE_SYSTEM_PROMPT) and every worked example was byte-identical to
+src/step4a_prompts.py at the time of this duplication -- only the
+module-level docstring (documentation, not prompt content) was written
+fresh. See the entry just below for the first real wording change made
+to this file.
+
+2026-11-24 "verdict-last" fix (USER_TEMPLATE pass 1, VERIFY_USER_TEMPLATE
+pass 2): diagnosed from job20905947 (the first full remote-chain run on
+GOLD800). step4a's oracle accuracy on that run (62.9%, n=89) was well
+below the classic 8B baseline (82.1% majority / 83.2% best run), with a
+heavily FN-directional error pattern (30 FN vs 3 FP). Reading the FN
+rows' own stored justifications found that 24/30 (80%) were NOT genuine
+reasoning failures: the draft's own justification text literally opens
+with "SOURCED -- <correct reasoning, closely matching gold's own
+justification>", yet the row's stored source_attribution_draft is
+JOURNALIST. Across the full 800-row run, 47/62 (76%) of all
+draft-JOURNALIST rows show this same contradiction.
+
+Root cause: this prompt's own closing instruction ("Then, on a new line,
+answer with exactly one word: SOURCED -- if ... / JOURNALIST -- if ...")
+models the answer as a "LABEL -- condition" pair, which the 70B tends to
+take literally and front-load as "SOURCED -- <its reasoning>" at the very
+START of its response, sometimes with no separate concluding label line
+at all. src/verify_utils.py's shared parse_draft_labeled()/_find_label()
+(used unconditionally by every step/backend, deliberately NOT duplicated
+here) resolve a label by scanning the LAST line of the response first --
+tuned against the local 8B's own tendency to reason-then-conclude. When
+the 70B's actual last line instead continues the reasoning and happens to
+use the word "journalist" as ordinary language (e.g. contrasting with
+"the journalist's own narrative"), the parser locks onto that incidental
+mention instead of the real, already-stated opening verdict -- while the
+justification text it saves (everything except that misread last line)
+still keeps the correct opening "SOURCED --" sentence, which is exactly
+how the contradiction was caught after the fact.
+
+Fix (Maxime's explicit request, scoped to this remote-only file, per his
+instruction: ask the model to justify first and answer last, so the
+single-word verdict is unambiguously the final line): both USER_TEMPLATE
+and VERIFY_USER_TEMPLATE now explicitly forbid opening with (or using
+inside the reasoning) the bare words SOURCED/JOURNALIST, and require the
+single verdict word, alone and with no trailing dash/explanation, as the
+very last line of the response -- so _find_label(lines[-1]) sees nothing
+but that one clean word regardless of how the preceding reasoning is
+phrased. FORCE_USER_TEMPLATE
+(the no-justification last-resort pass) was already unambiguous ("Answer
+with exactly one word: SOURCED or JOURNALIST.") and is left untouched.
+Not yet re-run/confirmed on real data -- see sbatch_step4a_remote_test.sh
+for the next test run.
 
 scripts/step4a_source_attribution.py picks this module instead of
 src/step4a_prompts.py only when --backend litellm is used; every other
@@ -85,10 +126,19 @@ For example:
 - "The piece quotes an economist about the state of the labour market, then separately argues in its own voice that the minister's reform is misguided." -> JOURNALIST: an outside voice is quoted, but not for the criticism of the minister -- that judgment is the article's own.
 - "The piece argues, in its own narrative voice, that the reform is short-sighted and will hurt small businesses, without attributing that judgment to any critic, resident, expert, or other outside voice." -> JOURNALIST: no outside voice is credited with the criticism at all.
 
-First, in one sentence, say whether the criticism of "{keyword}" specifically is attributed to an outside voice (and who, even loosely), or whether it is the article's own narrative framing.
-Then, on a new line, answer with exactly one word:
-SOURCED — if the criticism of "{keyword}" is attributed to any outside voice, named or not.
-JOURNALIST — if no outside voice is credited with that specific criticism and it is the article's own narrative framing.\
+Write your reasoning first: in one or two full sentences, explain whether
+the criticism of "{keyword}" specifically is attributed to an outside
+voice (and who, even loosely), or whether it is the article's own
+narrative framing. Do not begin your response with the word SOURCED or
+JOURNALIST, and do not use either of those two words anywhere inside this
+reasoning -- describe what you found in plain language instead.
+
+Only after that reasoning, add one final new line containing nothing but
+a single word -- no dash, no explanation, no punctuation, nothing else on
+that line:
+SOURCED, if the criticism of "{keyword}" is attributed to any outside voice, named or not.
+JOURNALIST, if no outside voice is credited with that specific criticism and it is the article's own narrative framing.
+That single word must be the very last thing in your response.\
 """
 
 
@@ -140,9 +190,14 @@ individual singled out. For each one you find, check specifically: are THEY the 
 the criticism of "{keyword}", or are they mentioned for some other reason?
 
 Then say in one or two sentences what you found (name the actor if you found one, or say plainly \
-that the search found none), and finish on a new line with exactly one word:
-SOURCED — if you found an outside voice credited with the criticism of "{keyword}" that the first pass missed.
-JOURNALIST — if, even after this closer search, no outside voice of any kind is credited with that specific criticism.\
+that the search found none) -- without using the words SOURCED or JOURNALIST anywhere in that \
+explanation.
+
+Only after that explanation, add one final new line containing nothing but a single word -- no \
+dash, no explanation, no punctuation, nothing else on that line:
+SOURCED, if you found an outside voice credited with the criticism of "{keyword}" that the first pass missed.
+JOURNALIST, if, even after this closer search, no outside voice of any kind is credited with that specific criticism.
+That single word must be the very last thing in your response.\
 """
 
 

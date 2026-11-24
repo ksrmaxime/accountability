@@ -15,15 +15,66 @@ file's own module docstring for its full tuning history -- the pass-2
 removal/reactivation/removal cycle documented there, the "organisational
 link" paragraph addressing office/spokesperson confusion, etc.).
 
-As of this creation, NO WORDING HAS BEEN CHANGED ANYWHERE BELOW: SYSTEM_PROMPT,
+At creation, NO WORDING HAD BEEN CHANGED ANYWHERE BELOW: SYSTEM_PROMPT,
 build_user_prompt, VERIFY_SYSTEM_PROMPT and build_verify_prompt (and the
-unused strip_negative_boilerplate helper) are all byte-identical to
-src/step6_prompts.py at the time of this duplication -- only this module-
-level docstring (documentation, not prompt content) was written fresh,
-replacing that file's own tuning-history docstring, which documents a
-history specific to that file and not (yet) to this one. This is
-intentionally just a safe, isolated starting point for later remote-
-specific tuning, not a tuning pass itself.
+unused strip_negative_boilerplate helper) were all byte-identical to
+src/step6_prompts.py at the time of this duplication -- only the module-
+level docstring (documentation, not prompt content) was written fresh.
+See the entry just below for the first real wording change made to this
+file.
+
+2026-11-24 reinforcement pass (USER_TEMPLATE only -- pass 1, the only pass
+this step's script actually calls): diagnosed from job20905947 (the first
+full remote-chain run on GOLD800). step6's oracle accuracy on that run
+(79.8%, n=89) was already the best of the 4 analyzed remote steps and
+above the classic 8B baseline (62-72%), but Maxime asked for the 18
+errors (15 FN, 3 FP) to be read anyway. Not a parsing bug (checked the
+same way as step4a/step5 -- no opening/closing bare-word mismatch). One
+of the 15 FN (DDPS/VBS, the Ritter interview row) is a gold annotation
+error, not a pipeline error -- labelled YES but its own justification
+says "Aucune reponse officielle du VBS... n'est rapportee"; flagged to
+Maxime, left as-is in gold. Of the other 17:
+  - ~6 FN are genuine retrieval misses: the model's own justification
+    flatly states no response exists anywhere in the article (e.g.
+    armasuisse, SEM, the SRC director), when gold quotes one that does.
+    Maxime explicitly decided NOT to add a pass 2 re-read for this
+    (unlike step4a's "forced re-search") -- these will likely persist.
+  - ~3 FN are self-contradictions: the model's OWN justification already
+    states the organisation's justification near-verbatim to gold's own
+    (DETEC's privacy-harm reversal, the EFD/UBS manager-responsibility
+    defense) and still answers NO; one (OFCL/BBL) reads as the model
+    silently requiring the justification to come AFTER the criticism in
+    the text, which USER_TEMPLATE already says not to require ("may
+    appear anywhere in the article") but apparently not forcefully
+    enough to survive to the final word.
+  - 3 FN (Baume-Schneider declining a round table, the EFD filing a legal
+    appeal, Cassis changing his public position) are gold counting a
+    reported ACTION as itself a sufficient response, with no quoted
+    statement -- directly against this prompt's own explicit exclusion
+    ("the article merely reports that {keyword} took some action...
+    without actually saying anything about it"). Maxime explicitly chose
+    to KEEP this exclusion as-is (not change it to match gold's
+    practice) -- these 3 are accepted as disagreements with gold, not
+    something this prompt should chase.
+  - All 3 FP share one shape: the model credits a real statement as a
+    response, but it addresses a DIFFERENT topic than the actual reproach
+    being evaluated (Rosti speaking on unrelated matters in the same
+    piece, the NDB regretting only the leak and not the underlying
+    unlawfulness finding), and once (OSAV/BLV) the credited statement is
+    from a DIFFERENT, unlinked agency (Swissmedic) entirely -- a direct
+    violation of this prompt's own existing organisational-link rule.
+Fix below targets only the two patterns Maxime asked to address by
+prompt wording alone (not the retrieval misses, not the action-as-
+response gold disagreement, both explicitly left alone): (1) a new
+paragraph requiring the credited response to address the SAME reproach
+being evaluated, not a different topic or a different, unlinked entity,
+with a worked negative example mirroring the Swissmedic/BLV mix-up; (2)
+a closing check-before-answering reminder that a justification/defense
+already identified in the model's own reasoning must be counted as YES
+regardless of where in the article it appears or how it is framed --
+aimed at the DETEC/EFD-style self-contradictions. Not yet re-run/
+confirmed on real data -- see sbatch_step6_remote_test.sh for the next
+test run.
 
 scripts/step6_admin_response.py picks this module instead of
 src/step6_prompts.py only when --backend litellm is used; every other
@@ -50,9 +101,13 @@ to the reproach addressed to them.
 
 Count as a response: a direct statement from "{keyword}" itself; a statement given on its behalf by an official spokesperson, a subordinate service, or a unit acting under its authority (for example, a specialised office responding in the name of the department it belongs to); or any explanation, justification, defense, acknowledgment of the problem, promise to fix or review it, or attempt to minimize its importance, regarding the decision or situation being criticized -- even if that statement is brief, general, or not explicitly framed as a reply to the criticism. The response may appear anywhere in the article, not only right after the criticism -- read the whole article before answering.
 
-When such a response comes from an office, spokesperson, or minister rather than "{keyword}" by name, decide whether that speaker counts for "{keyword}" using only what the article itself states -- look for an explicit link written in the text (for example, "Bundesamt X von Bundesrat {keyword}", "{keyword}'s department/office", or a shared ministry named earlier in the article), not your own assumptions about how an administration is organised. If the article instead marks the speaker as belonging to a different level or place (a canton, a different country, an unrelated body) even under a similar-sounding title, that speaker's statement does not count for "{keyword}".
+When such a response comes from an office, spokesperson, or minister rather than "{keyword}" by name, decide whether that speaker counts for "{keyword}" using only what the article itself states -- look for an explicit link written in the text (for example, "Bundesamt X von Bundesrat {keyword}", "{keyword}'s department/office", or a shared ministry named earlier in the article), not your own assumptions about how an administration is organised. If the article instead marks the speaker as belonging to a different level or place (a canton, a different country, an unrelated body) even under a similar-sounding title, that speaker's statement does not count for "{keyword}" -- this includes a different federal office with related subject-matter expertise (for example, a statement from a different, separately-named agency about a related technical question does not count for "{keyword}" unless the article itself explicitly ties that agency's statement to "{keyword}").
+
+The statement you count must address the SAME reproach you are evaluating here, not a different criticism, a different topic, or only one narrow part of a broader accusation while leaving its actual substance untouched. "{keyword}" (or the article) covering other matters elsewhere in the piece, or reacting to only a side aspect of what is being criticized while ignoring the real substance of the reproach, does not count as a response to THIS reproach. For example, if "{keyword}" is accused of favouring one interest group but only speaks in the article about an unrelated procedural question, or if an office only expresses regret that an internal report was leaked without addressing what that report actually found, that does not count.
 
 Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, because another party unconnected to it comments on the criticism, or because the article merely reports that "{keyword}" took some action, changed course, or came under pressure, without "{keyword}" (or its spokesperson) actually saying anything about it.
+
+Before you answer, check your own reasoning above: if you have identified ANY sentence, however brief or routine-sounding, where "{keyword}" (or a spokesperson/unit explicitly linked to it, as defined above) explains, justifies, defends, or minimizes the criticized decision, and that sentence addresses the same reproach being evaluated here, your answer must be YES -- even if that sentence also serves another purpose in the article, even if it is not explicitly framed as a reply, and regardless of whether it appears before or after the criticism in the text. Do not talk yourself out of a justification you have already found.
 
 First, in one sentence, briefly justify your answer based solely on the article.
 Then, on a new line, answer with exactly one word: YES or NO.\

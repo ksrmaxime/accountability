@@ -15,14 +15,69 @@ file's own module docstring for its full tuning history -- the pass-2
 removal/reactivation/removal cycle documented there, the ENTITY->POLICY
 boilerplate-echo bias, etc.).
 
-As of this creation, NO WORDING HAS BEEN CHANGED ANYWHERE BELOW: SYSTEM_PROMPT,
-build_user_prompt, VERIFY_SYSTEM_PROMPT and build_verify_prompt are all
+At creation, NO WORDING HAD BEEN CHANGED ANYWHERE BELOW: SYSTEM_PROMPT,
+build_user_prompt, VERIFY_SYSTEM_PROMPT and build_verify_prompt were all
 byte-identical to src/step5_prompts.py at the time of this duplication --
-only this module-level docstring (documentation, not prompt content) was
-written fresh, replacing that file's own tuning-history docstring, which
-documents a history specific to that file and not (yet) to this one. This
-is intentionally just a safe, isolated starting point for later remote-
-specific tuning, not a tuning pass itself.
+only the module-level docstring (documentation, not prompt content) was
+written fresh. See the entry just below for the first real wording change
+made to this file.
+
+2026-11-24 "specific-choice" redefinition (SYSTEM_PROMPT + USER_TEMPLATE
+only -- pass 1, the only pass this step's script actually calls; see
+below): diagnosed from job20905947 (the first full remote-chain run on
+GOLD800). step5's oracle accuracy on that run (71.9%, n=89) was below the
+classic 8B baseline (76-78%), with a heavily FN-directional error pattern
+(22 FN "pred ENTITY/gold POLICY" vs 3 FP) and weak POLICY recall (29%).
+Reading all 25 error rows' own justifications (pipeline's and gold's)
+found two distinct things going on, NOT a parsing bug (unlike step4a's
+2026-11-24 fix just above in this file's sibling -- none of these 25
+justifications open or close on the wrong bare word):
+  (a) 4/25 rows (VBS, Ignazio Cassis, OFC/BAK, DFAE/EDA) are gold
+      annotation errors, not pipeline errors -- gold's own stored
+      content_type_justification argues the OPPOSITE of gold's own
+      stored content_type label (e.g. VBS: labelled POLICY, but its own
+      justification says "et non sur un choix de politique publique
+      precis"). Same failure mode as the already-revised OFROU/ASTRA row
+      (see src/step5_prompts.py's own changelog), just never caught for
+      these four. Flagged to Maxime, left as-is in gold for him to review
+      separately -- not something a prompt change can fix.
+  (b) The other ~21 rows are a genuine, systematic criterion mismatch.
+      This prompt's old test asked "if executed flawlessly, would the
+      criticism disappear?", which pushed the model to answer ENTITY
+      whenever the criticism was phrased in terms of competence,
+      communication, judgment, or integrity -- even when one specific,
+      named policy/decision/measure was squarely the thing being
+      criticized (e.g. "the agency's choice to END the Masterplan
+      Biomedizin is a bad signal" -> model said ENTITY ("the agency's
+      choice", "bad signal" read as a competence/judgment complaint);
+      gold said POLICY (it IS a specific measure -- its suppression).
+      Gold's actual practice, read across these cases, counts ANY
+      criticism aimed at one specific, identifiable policy/measure as
+      POLICY regardless of whether that criticism is framed as about the
+      measure's wisdom, its communication, or the competence/integrity
+      behind it -- ENTITY is for criticism with no single specific choice
+      at its center, a value judgment about the target itself.
+Fix (Maxime's explicit rule, given verbatim): POLICY now covers any stage
+of a public policy's life (proposal, development, implementation, effect,
+modification, suppression) whenever the reproach is PRECISELY the choice
+to do one of those things -- however harshly phrased (a mistake, a
+betrayal, cowardice, etc. are all still POLICY if what's being judged is
+the choice itself). ENTITY is reserved for a value judgment about the
+target's clairvoyance, competence, behaviour, track record, management,
+or morality, detached from any single specific choice. Maxime's own two
+worked examples ("M. X regrette la proposition de Z de soutenir la
+reforme X" -> POLICY; "M. X trouve Z vraiment lache de soutenir une
+reforme pareille" -> ENTITY) are reproduced in both SYSTEM_PROMPT and
+USER_TEMPLATE below. Deliberately does NOT add a third "BOTH" answer
+(discussed and explicitly deferred by Maxime): gold's own 800 rows only
+have POLICY/ENTITY today, so a BOTH answer could never be scored against
+it without first re-annotating gold itself -- a separate, larger task.
+VERIFY_SYSTEM_PROMPT/VERIFY_USER_TEMPLATE (pass 2) are dead code for this
+step -- scripts/step5_content_type.py never calls them (pass 2 was
+removed, see src/step5_prompts.py's own changelog) -- and were
+deliberately NOT updated to match this new rule; if pass 2 is ever
+reactivated here, revisit them too. Not yet re-run/confirmed on real
+data -- see sbatch_step5_remote_test.sh for the next test run.
 
 scripts/step5_content_type.py picks this module instead of
 src/step5_prompts.py only when --backend litellm is used; every other
@@ -39,24 +94,37 @@ Your task is to classify the NATURE of this criticism into ONE of two categories
 
 === CATEGORIES ===
 
-  Entity  — the criticism targets the target ITSELF: its behaviour, competence,
-            efficiency, management, integrity, morality, or a personal or
-            institutional scandal involving it or the people who run it.
+  Policy  — the criticism is aimed at a specific, identifiable PUBLIC
+            POLICY or measure, at any stage of its life: it being
+            proposed, developed, implemented, having an effect, being
+            modified, or being dropped/suppressed. This applies whenever
+            what is reproached to the target is PRECISELY its choice to
+            propose, develop, implement, change, or suppress that
+            specific policy or measure -- even when the reproach is
+            phrased harshly, as a mistake, a betrayal, cowardice, or bad
+            judgment, as long as the thing actually being judged is that
+            choice itself.
 
-  Policy  — the criticism targets a specific, identifiable PUBLIC POLICY
-            CHOICE: a named bill, reform, regulation, budget, decision, or
-            proposal the target is responsible for.
+  Entity  — the criticism does NOT bear on a specific policy choice, but
+            is instead a value judgment about the target itself: its
+            clairvoyance, competence, behaviour, track record,
+            management, or morality -- judging the target as an actor,
+            detached from any single specific choice.
 
-A specific policy, decision, or project being named in the article does NOT
-by itself make this POLICY, and neither does your own justification simply
-using the words "policy", "choice", or "decision" -- the decisive question
-is what the criticism is actually about. Ask yourself: if the target had
-executed this flawlessly, would the criticism disappear? If yes, the
-criticism is about delivery, competence, or communication -> answer ENTITY,
-even though a specific policy, decision, or project is the backdrop. If the
-criticism would remain even with flawless execution -- because critics
-object to the content or wisdom of the choice itself, and a different
-decision should have been made -- answer POLICY.\
+The test is not whether a specific policy, decision, or project is named
+in the article, and not whether your own justification uses the words
+"policy", "choice", or "decision" -- a named measure can still be nothing
+more than the backdrop to a purely ENTITY-style character judgment. The
+test is: is the reproach aimed AT a specific choice concerning a public
+policy (its proposal, development, implementation, effect, modification,
+or suppression) -- POLICY -- or is it a value judgment about the target's
+qualities or conduct, detached from any single specific choice -- ENTITY?
+
+For example:
+- "Mr X regrets that entity Z proposed to support reform X." -> POLICY: the reproach is aimed at the choice to propose/support that specific reform.
+- "Mr X finds entity Z really cowardly for supporting such a reform." -> ENTITY: the reproach is a value judgment about Z's character (cowardice), not about the choice itself.
+- "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months, with no specific decision about the program itself being questioned." -> ENTITY: a general judgment about how the program is run day to day, not about one specific choice.
+- "The agency is criticized for deciding to end the housing subsidy program despite its proven results." -> POLICY: the reproach is precisely the choice to end (suppress) that specific policy.\
 """
 
 USER_TEMPLATE = """\
@@ -65,11 +133,13 @@ In the article below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Is this criticism about a specific PUBLIC POLICY choice made by "{keyword}", or about "{keyword}" as an ENTITY (its behaviour, competence, efficiency, integrity, or a personal/institutional scandal)?
+Is this criticism aimed at a specific PUBLIC POLICY choice made by "{keyword}" (its proposal, development, implementation, effect, modification, or suppression), or is it a value judgment about "{keyword}" as an ENTITY (its clairvoyance, competence, behaviour, track record, management, or morality), detached from any single specific choice?
 
-Naming a specific policy, project, or decision does not by itself decide the answer -- ask: would the criticism disappear if "{keyword}" had executed it flawlessly? If yes, this is ENTITY. If the criticism would remain even with flawless execution, this is POLICY.
+Naming a specific policy, project, or decision does not by itself decide the answer. Ask: is the reproach precisely the choice to propose, develop, implement, change, or suppress that specific policy -- even if phrased harshly, as a mistake or a betrayal? If yes, this is POLICY. Or is the reproach a value judgment about "{keyword}" itself (its clairvoyance, competence, behaviour, track record, management, or morality), with no single specific choice actually being the target? If yes, this is ENTITY.
 
-For example: "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months." -> ENTITY: the criticism targets how poorly the program was run, not whether the subsidy itself was the right choice -- flawless execution would have resolved it.
+For example:
+- "Mr X regrets that "{keyword}" proposed to support reform X." -> POLICY: the reproach is aimed at the choice to propose/support that reform.
+- "Mr X finds "{keyword}" really cowardly for supporting such a reform." -> ENTITY: a value judgment about "{keyword}"'s character, not about the choice itself.
 
 First, in one sentence, justify your answer based on the article.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
