@@ -67,6 +67,50 @@ with exactly one word: SOURCED or JOURNALIST.") and is left untouched.
 Not yet re-run/confirmed on real data -- see sbatch_step4a_remote_test.sh
 for the next test run.
 
+2026-11-24 "attribution != outsideness" clarification (USER_TEMPLATE and
+VERIFY_USER_TEMPLATE, pass 1 and pass 2): reading job20943266's 14
+remaining FN oracle errors found that 7/14 (50%) share one conceptual root
+cause, across six different-looking surface patterns -- a court ruling
+(Tribunal administratif federal, x2), a federal audit office's finding
+(EFK), a parliamentary oversight committee's formal letter
+(Finanzdelegation), an agency chief's own quoted self-critical admission
+(armasuisse/Urs Loher), 250 named employees who signed an internal letter
+(DFAE/Cassis), and a signed guest op-ed's own named author (a filmmaker,
+not a staff journalist, writing for Baume-Schneider's portfolio). In every
+case, pass 1's own justification correctly identifies the actor by name
+but still concludes JOURNALIST, reasoning that nothing "external" or
+"adversarial" was credited with the criticism -- while gold counts all six
+as SOURCED. Root cause: although this file's own SYSTEM_PROMPT already
+defines "outside voice" as "external to the journalist" (never "external
+to the organisation"), the USER_TEMPLATE/VERIFY_USER_TEMPLATE's worked
+examples and exclusion clause are all built from classic adversarial-
+external-individual cases, which appears to have implicitly anchored the
+model on a narrower reading than the definition actually states. Maxime's
+own framing, used verbatim as the fix: "la voix exterieure, c'est une voix
+autre que le journaliste, et pas une voix exterieure a l'entite" -- a
+specific, identifiable, named/countable source counts regardless of
+whether it is organisationally external to "{keyword}" (a court or audit
+office's own formal finding; a named individual's own quoted admission,
+even if that individual IS "{keyword}" or speaks for it; a specific,
+countable collective such as named letter-signatories, even if internal to
+the criticized organisation; a signed guest author distinct from a staff
+journalist) -- as opposed to a vague, anonymous, undifferentiated
+reference (no specific nameable/countable referent) or the journalist's
+own unattributed narration, which still correctly stays JOURNALIST (kept
+an explicit worked example for this, mirroring the already-correctly-
+classified "diffuse numismatic community" JOURNALIST row from the same
+run, to guard against over-broadening). Added four new worked examples per
+template (audit finding, self-critical chief, named-collective letter,
+guest op-ed author) plus the diffuse-reference JOURNALIST counter-example,
+and widened VERIFY_USER_TEMPLATE's forced-enumeration instruction to name
+these categories explicitly, so pass 2's re-search actually looks for
+them. The existing "{keyword}' itself never counts... just because it is
+named as the subject" exclusion is UNCHANGED and still correct -- it is
+about passive naming-as-subject, not about "{keyword}" (or its
+representative) being actively quoted admitting the criticism, which is a
+different case, now explicitly carved out. Not yet confirmed on a real
+run.
+
 scripts/step4a_source_attribution.py picks this module instead of
 src/step4a_prompts.py only when --backend litellm is used; every other
 backend (vllm/transformers) is completely unaffected, byte-for-byte, by
@@ -105,18 +149,49 @@ category of people ("residents," "opponents," "experts"), or survey
 respondents -- none of this needs a specific person's name to qualify.
 "{keyword}" itself never counts as that voice just because it is named as
 the one who made the decision, took the action, or is otherwise the
-subject of the criticism.
+subject of the criticism -- that is different from "{keyword}" itself (or
+someone speaking for it) being actively QUOTED acknowledging or admitting
+the criticism in their own words; see below.
+
+"Outside voice" means a voice other than the journalist's own narrating
+voice -- it does NOT need to be external to the organisation or person
+being criticized. In particular, all of the following count as an outside
+voice, as long as they are specifically credited with the criticism of
+"{keyword}":
+- a court, tribunal, audit office, or other oversight body's own formal
+  ruling, finding, or report (e.g. a court declaring a decision unlawful,
+  an audit office's report, a parliamentary committee's letter) -- the
+  institution itself is making that determination, not the journalist,
+  even though it is part of the state apparatus rather than an adversarial
+  outsider;
+- a specific, named individual's own quoted words acknowledging or
+  admitting the criticism, even when that individual IS "{keyword}" or
+  speaks for/within the entity being criticized (e.g. an agency's own head
+  candidly admitting, in his own words, that something went wrong) -- what
+  matters is that it is that person's own voice, not the journalist's;
+- a specific, identifiable, or countable collective credited by name or
+  clear description, even if internal to the criticized organisation (e.g.
+  "250 employees who signed an internal letter") -- unlike a vague,
+  undifferentiated reference with no specific nameable or countable
+  referent (e.g. "critics say," "some observers," "the community"), which
+  does NOT count and stays JOURNALIST;
+- a signed opinion piece or guest column written by an identified outside
+  figure (an expert, a stakeholder, an affected party), as distinct from a
+  staff journalist's own byline -- that counts as the named author's own
+  voice, even though it is signed.
 
 Two things do NOT settle the question by themselves: a signed byline does
 not mean the article has no outside sources behind the criticism of
 "{keyword}" -- a signed piece can still quote or cite someone else's
-criticism of the target. And sources quoted elsewhere in the article, for
-other claims or about other people, do not count unless they are
+criticism of the target (or, per above, be itself the voice of an
+identified outside author). And sources quoted elsewhere in the article,
+for other claims or about other people, do not count unless they are
 specifically the ones credited with the criticism of "{keyword}" itself.
 
 The answer is JOURNALIST only when, specifically for the criticism of
-"{keyword}", no outside voice of any kind -- named or not -- is credited
-with holding or voicing it: the judgment is presented as the article's own.
+"{keyword}", no outside voice of any kind -- named or not, internal or
+external to the criticized party -- is credited with holding or voicing
+it: the judgment is presented as the article's own.
 
 For example:
 - "Residents interviewed for the piece say the new bus route is useless and badly planned." -> SOURCED: an outside group ("residents") is credited with the criticism, even though no individual is named.
@@ -125,6 +200,11 @@ For example:
 - "A year-end roundup lists, among several federal councillors, that Martin Pfister had a difficult year." -> JOURNALIST: Pfister's name appears only as the subject being discussed; no one is credited with criticizing him.
 - "The piece quotes an economist about the state of the labour market, then separately argues in its own voice that the minister's reform is misguided." -> JOURNALIST: an outside voice is quoted, but not for the criticism of the minister -- that judgment is the article's own.
 - "The piece argues, in its own narrative voice, that the reform is short-sighted and will hurt small businesses, without attributing that judgment to any critic, resident, expert, or other outside voice." -> JOURNALIST: no outside voice is credited with the criticism at all.
+- "A federal audit office's report concludes that the agency mismanaged the funds, and the article cites this finding." -> SOURCED: the audit office's own formal finding is credited with the criticism, even though it is a state body, not an adversarial outsider.
+- "The agency's own director, quoted directly, says: 'We made serious mistakes and should have acted sooner.'" -> SOURCED: the director's own quoted admission is his own voice, not the journalist's narration -- even though he heads the criticized agency itself.
+- "250 employees of the ministry sign an internal letter criticizing its leadership, and the article reports on this letter." -> SOURCED: a specific, countable, documented group is credited with the criticism, even though they work inside the criticized ministry.
+- "A guest column, signed by an outside economist, argues that the minister's reform is misguided." -> SOURCED: the signed author is an identified outside figure, not the paper's own journalist, so the criticism is attributed to her, not to the article's own narrative.
+- "A roundup piece vaguely mentions that 'collectors have grumbled' about the agency's new policy, without naming or identifying any specific person, group, or document." -> JOURNALIST: the reference is too diffuse and unidentified to count as a specific outside voice.
 
 Write your reasoning first: in one or two full sentences, explain whether
 the criticism of "{keyword}" specifically is attributed to an outside
@@ -176,18 +256,37 @@ An outside voice can be identified as loosely as a named individual, a political
 an administration, a company, an association, a category of people ("residents," "opponents," \
 "experts"), or survey respondents -- none of this needs a specific person's name to qualify. \
 "{keyword}" itself never counts as that voice just because it is named as the one who made the \
-decision, took the action, or is otherwise the subject of the criticism. A signed byline does not \
+decision, took the action, or is otherwise the subject of the criticism -- but that is different \
+from "{keyword}" itself (or someone speaking for it) being actively QUOTED acknowledging or \
+admitting the criticism in their own words, which DOES count (see below). A signed byline does not \
 mean the article has no outside sources behind the criticism of "{keyword}" -- a signed piece can \
-still quote or cite someone else's criticism of the target. And sources quoted elsewhere in the \
-article, for other claims or about other people, do not count unless they are specifically the \
-ones credited with the criticism of "{keyword}" itself.
+still quote or cite someone else's criticism of the target, or itself be the voice of an identified \
+outside author (see below). And sources quoted elsewhere in the article, for other claims or about \
+other people, do not count unless they are specifically the ones credited with the criticism of \
+"{keyword}" itself.
+
+"Outside voice" means a voice other than the journalist's own narrating voice -- it does NOT need \
+to be external to the organisation or person being criticized. All of the following count, as long \
+as they are specifically credited with the criticism of "{keyword}": a court, tribunal, audit \
+office, or other oversight body's own formal ruling, finding, or report (even though it is part of \
+the state apparatus, not an adversarial outsider); a specific, named individual's own quoted words \
+acknowledging or admitting the criticism, even when that individual IS "{keyword}" or speaks for/ \
+within the entity being criticized (e.g. an agency's own head candidly admitting, in his own words, \
+that something went wrong); a specific, identifiable, or countable collective credited by name or \
+clear description, even if internal to the criticized organisation (e.g. "250 employees who signed \
+an internal letter") -- unlike a vague, undifferentiated reference with no specific nameable or \
+countable referent ("critics say," "some observers," "the community"), which does NOT count; and a \
+signed opinion piece or guest column written by an identified outside figure (an expert, a \
+stakeholder, an affected party), as distinct from a staff journalist's own byline.
 
 Before answering, go through the article once more and list, one by one, every named individual, \
-political party, canton, administration, company, association, category of people, or other actor \
-mentioned anywhere in connection with the criticism of "{keyword}" -- even if mentioned only \
-briefly, in a quote, in an interview answer or question, or as part of a named group with no \
-individual singled out. For each one you find, check specifically: are THEY the one credited with \
-the criticism of "{keyword}", or are they mentioned for some other reason?
+political party, canton, administration, company, association, category of people, court or \
+tribunal, audit or oversight body, signed author, or other actor mentioned anywhere in connection \
+with the criticism of "{keyword}" -- even if mentioned only briefly, in a quote, in an interview \
+answer or question, as part of a named group with no individual singled out, as a formal ruling or \
+report, or as "{keyword}" itself (or someone speaking for it) openly acknowledging the criticism in \
+their own words. For each one you find, check specifically: are THEY the one credited with the \
+criticism of "{keyword}", or are they mentioned for some other reason?
 
 Then say in one or two sentences what you found (name the actor if you found one, or say plainly \
 that the search found none) -- without using the words SOURCED or JOURNALIST anywhere in that \

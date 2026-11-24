@@ -43,6 +43,16 @@ set -eo pipefail
 # PASS1_COHERENCE_*/SKIP_PASS1_COHERENCE knobs below only ever take effect
 # on this remote run.
 #
+# 2026-11-24, same day: DISABLED BY DEFAULT (SKIP_PASS1_COHERENCE now
+# defaults to 1, not 0) after job20943266 showed a mixed-to-negative
+# signal -- of the 9 rows it corrected, only 2 moved toward gold while 4
+# moved away, because the check trusts pass 1's own justification text,
+# which is sometimes itself an incomplete retrieval (missed the real
+# outside voice) rather than an unreliable bare word. See
+# scripts/step4a_source_attribution.py's own module docstring for the
+# full writeup. The mechanism is kept in the codebase, off by default,
+# in case more data changes this picture.
+#
 # API key: read from a .env file at the repo root (UNIL_LITELLM_API_KEY=...)
 # -- see sbatch_step3_remote_test.sh's header comment for the full
 # .env/gitignore convention, unchanged here.
@@ -107,7 +117,12 @@ PASS1_COHERENCE_BATCH_SIZE=32
 PASS1_COHERENCE_CHECKPOINT_EVERY=200
 PASS1_COHERENCE_THRESHOLD=${PASS1_COHERENCE_THRESHOLD:-0.5}
 PASS1_COHERENCE_MARGIN=${PASS1_COHERENCE_MARGIN:-0.15}
-SKIP_PASS1_COHERENCE=${SKIP_PASS1_COHERENCE:-0}
+# 2026-11-24: disabled by DEFAULT (Maxime's decision) -- see
+# scripts/step4a_source_attribution.py's own module docstring for the full
+# rationale. Pass SKIP_PASS1_COHERENCE=0 as an env var (e.g.
+# `SKIP_PASS1_COHERENCE=0 sbatch sbatch_step4a_remote_test.sh ...`) to
+# re-enable it for a one-off test if the mechanism is revisited later.
+SKIP_PASS1_COHERENCE=${SKIP_PASS1_COHERENCE:-1}
 
 # Pass 2 ("forced re-search") -- same as the GPU run.
 VERIFY_BATCH_SIZE=8

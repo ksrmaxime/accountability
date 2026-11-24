@@ -147,6 +147,63 @@ src/step4a_prompts.py) stays completely unaffected, byte-for-byte --
 this check is simply skipped (n_p1coh_checked = 0) for any other backend,
 regardless of --skip_pass1_coherence. Not yet confirmed on a real run.
 
+2026-11-24, same day: CONFIRMED on job20943266, and DISABLED BY DEFAULT
+(sbatch_step4a_remote_test.sh's SKIP_PASS1_COHERENCE now defaults to 1)
+as a result. The pass ran on 104 rows, left 95 untouched (agreed or
+inconclusive), and corrected 9. Of the 6 corrected rows checkable against
+gold, only 2 moved TOWARD gold (Ignazio Cassis, SRC/NDB -- both genuine
+clean self-contradictions: the justification plainly named an outside
+voice, or plainly named none, while the bare word said the opposite) and
+4 moved AWAY from gold (Guy Parmelin, OSAV/BLV, SEM, one DDPS/VBS row).
+Reading those 4, the mechanism's blind spot is structural, not a tuning
+problem: this check trusts pass 1's OWN justification text as ground
+truth and corrects the bare word to match it -- but in these 4 cases the
+justification itself is an INCOMPLETE retrieval (it says "no outside
+voice found" because pass 1's search genuinely missed the real one that
+gold cites), while the original bare word (SOURCED) happened to be
+correct anyway. A check that reads only the justification, never the
+article, cannot tell a confidently-wrong-but-internally-coherent
+justification apart from a genuinely coherent one -- it can only enforce
+internal consistency, not correctness, and here enforcing consistency
+actively discarded a correct-by-luck answer. One of the 4 (the DDPS/VBS
+row, p_sourced=0.886) additionally looks like a plain misread by the
+check itself: the justification explicitly says "No external voice... is
+credited" right after naming several internal VBS officials, and the
+check read that as 86.6% SOURCED anyway -- a second, distinct failure
+mode (the reading-comprehension question struggling with a paragraph
+that names several people while explicitly disclaiming all of them as
+internal). Maxime's call, given both failure modes stem from the same
+root cause he named directly: "la justification n'est pas toujours
+fiable" -- disable by default rather than keep tuning on an n=6 signal.
+The mechanism is NOT deleted (the prompts module, the orchestration
+pass, and every CLI arg all stay exactly as implemented) in case a
+larger sample changes this picture later -- see
+sbatch_step4a_remote_test.sh's own comment for how to re-enable it for a
+one-off test.
+
+2026-11-24 "glomming" detection (structural, --backend litellm ONLY):
+reading job20943266's 22 remaining oracle errors (the pass-1 coherence
+check disabled above left these untouched) found that 6 of its 8 false
+positives -- 75% of all remaining FP -- share one exact, purely mechanical
+signature: the draft justification's own plain-language reasoning clearly
+argues JOURNALIST, but the bare verdict word is glued directly onto the
+end of that same sentence with no real line break (e.g. "...without
+crediting any external individual, group, or institution with these
+specific judgments. SOURCED"). This is distinct from the pass-1 coherence
+check's failure mode above (which trusted a possibly-incomplete
+justification's CONTENT as ground truth): here the detection is purely
+STRUCTURAL -- is the model's own last line nothing but the bare label, or
+does it carry more text? -- so it carries none of that check's blind spot
+and needs no extra LLM call at all. See parse_draft_output_litellm_strict's
+own docstring below for the full mechanism: a detected glom is treated as
+an ordinary parse failure, routing the row through the ALREADY-EXISTING
+pass-1 retry ladder and, failing that, the force pass (whose bare-word-only
+ask sidesteps glomming entirely, since there is no reasoning to glue onto).
+Selected via active_parse_draft_fn alongside the other active_* prompt
+aliases -- gated the same way, strictly to --backend litellm; the
+production local-GPU path keeps calling parse_draft_output exactly as
+before, byte-for-byte unaffected. Not yet confirmed on a real run.
+
 Output columns: source_attribution                   -> "SOURCED" | "JOURNALIST" | NA  (FINAL --
                                                           pass 1, possibly corrected by the pass-1
                                                           coherence check, possibly flipped by
@@ -205,6 +262,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 import argparse
 from pathlib import Path
@@ -309,6 +367,75 @@ def parse_draft_output(raw: str) -> dict:
     if label is None:
         return empty
     return {"source_attribution_draft": label, "source_attribution_justification": justification}
+
+
+def _ends_with_clean_verdict_line(raw: str, label: str) -> bool:
+    """True iff `raw`'s own last non-blank line contains NOTHING but the
+    bare verdict word `label`, once non-letter characters (markdown
+    asterisks, trailing punctuation, whitespace) are stripped out -- e.g.
+    "SOURCED" or "**SOURCED**" both count as clean, but "Answer: SOURCED."
+    does NOT (the word "Answer" is extra text on that line too) -- i.e. the
+    model genuinely isolated the bare word on its own final line as
+    src/step4a_prompts_remote.py's USER_TEMPLATE/VERIFY_USER_TEMPLATE
+    explicitly instruct, with nothing else whatsoever on that line. False
+    when the label is glued onto the end of a longer line together with
+    reasoning text, or preceded by any other word on the same line --
+    deliberately strict in both directions, since the cost of a false
+    "not clean" here is just one extra retry (cheap, safe), while the cost
+    of a false "clean" is silently trusting a contradicted label (the exact
+    bug this function exists to catch). See parse_draft_output_litellm_strict's
+    own docstring just below for why the distinction matters."""
+    lines = [ln for ln in raw.strip().splitlines() if ln.strip()]
+    if not lines:
+        return False
+    letters_only = re.sub(r"[^A-Za-z]", "", lines[-1]).upper()
+    return letters_only == label.upper()
+
+
+def parse_draft_output_litellm_strict(raw: str) -> dict:
+    """2026-11-24 "glomming" detection -- --backend litellm ONLY (selected
+    at the call site in main(), alongside the other active_* aliases; the
+    production vllm/transformers path keeps using parse_draft_output
+    above, completely unaffected). See this file's own module docstring
+    for the full diagnosis: on job20943266, 6/9 of step4a's oracle false
+    positives (67%) shared one exact signature -- the justification's own
+    plain-language reasoning clearly argues JOURNALIST ("no outside voice
+    is credited...", "...framed as the author's own analysis"), yet the
+    bare verdict word is glued directly onto the end of that same sentence
+    with no real line break, e.g. "...these specific judgments. SOURCED".
+    src/verify_utils.py's shared parse_draft_labeled() is deliberately
+    designed to still extract a label in this case (branch 3: "label and
+    reasoning combined into a single line, returned verbatim") -- useful
+    as a fallback in general, but here the extracted label can flatly
+    contradict the reasoning it is glued to, because the 70B simply kept
+    writing past its own conclusion instead of stopping to isolate the
+    final word as instructed. This persists even after the 2026-11-24
+    "verdict-last" fix (src/step4a_prompts_remote.py), which only fixed
+    the earlier verdict-FIRST failure mode -- apparently asking for the
+    word last does not reliably make the model insert a genuine line break
+    before it.
+
+    Rather than trust a second LLM read of the (possibly itself incomplete)
+    justification -- the exact mechanism that made the pass-1 coherence
+    check net-negative/mixed on real data (see this file's own "CONFIRMED
+    on job20943266, and DISABLED BY DEFAULT" changelog entry) -- this
+    detects the glomming purely STRUCTURALLY, with no extra LLM call and no
+    content-based judgment call: is the response's own last line nothing
+    but the bare label, or does it carry more text? A detected glom is
+    treated exactly like an ordinary parse failure (both columns NA), so
+    the row flows into the ALREADY-EXISTING pass-1 retry ladder (same
+    prompt, higher temperature -- see the retry loop in main()) and,
+    failing every retry, the ALREADY-EXISTING force pass -- which asks for
+    a bare word with NO reasoning at all, sidestepping the glomming
+    mechanism entirely since there is no preceding sentence left for the
+    word to glue onto. Not yet confirmed on a real run."""
+    parsed = parse_draft_output(raw)
+    label = parsed.get("source_attribution_draft")
+    if pd.isna(label):
+        return parsed
+    if not _ends_with_clean_verdict_line(raw, label):
+        return {"source_attribution_draft": pd.NA, "source_attribution_justification": pd.NA}
+    return parsed
 
 
 def parse_pass2_output(raw: str) -> dict:
@@ -504,6 +631,9 @@ def main() -> int:
         active_build_verify_prompt = build_verify_prompt_remote
         active_force_system_prompt = FORCE_SYSTEM_PROMPT_REMOTE
         active_build_force_prompt = build_force_prompt_remote
+        # 2026-11-24 "glomming" detection -- --backend litellm ONLY, see
+        # parse_draft_output_litellm_strict's own docstring above.
+        active_parse_draft_fn = parse_draft_output_litellm_strict
     else:
         active_system_prompt = SYSTEM_PROMPT
         active_build_user_prompt = build_user_prompt
@@ -511,6 +641,7 @@ def main() -> int:
         active_build_verify_prompt = build_verify_prompt
         active_force_system_prompt = FORCE_SYSTEM_PROMPT
         active_build_force_prompt = build_force_prompt
+        active_parse_draft_fn = parse_draft_output
 
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
@@ -598,7 +729,7 @@ def main() -> int:
         system_prompt=active_system_prompt,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
         build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
-        parse_fn=parse_draft_output,
+        parse_fn=active_parse_draft_fn,
         output_cols=DRAFT_COLS,
         skip_if_already_filled="source_attribution_draft",
         checkpoint_path=checkpoint_path,
@@ -637,7 +768,7 @@ def main() -> int:
             system_prompt=active_system_prompt,
             select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_attribution_draft"].isna(),
             build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
-            parse_fn=parse_draft_output,
+            parse_fn=active_parse_draft_fn,
             output_cols=DRAFT_COLS,
             skip_if_already_filled="source_attribution_draft",
             checkpoint_path=checkpoint_path,

@@ -147,8 +147,67 @@ armasuisse/AFF-EFV/housing-subsidy/Masterplan-Biomedizin cases this
 redesign specifically targets). The model is also asked to name which
 test decided its answer (test 1 or test 2) in its one-sentence
 justification -- a new, free diagnostic signal for the next error
-analysis, at no extra cost. Not yet re-run/confirmed on real data -- see
-sbatch_step5_remote_test.sh for the next test run.
+analysis, at no extra cost.
+
+2026-11-24 "WHAT vs HOW" rewrite (COMPLETE replacement of SYSTEM_PROMPT +
+USER_TEMPLATE, not a patch on top of the "two-test" entry above -- see
+that entry's own text, which is kept here only as a historical record of
+what was tried and why it failed): the two-test design above was
+confirmed on job20943266 as an even WORSE regression than the
+specific-choice wording it replaced -- oracle accuracy 71.9%->46.7%->
+39.3%, with the model now predicting POLICY on 80/89 rows (53 FP). Root
+cause, found by reading the FP justifications rather than more aggregate
+numbers: the "swap test" in test 2 is practically vacuous. Any detailed,
+concrete criticism has unique supporting facts (a specific drone's
+autonomy failure, a specific webshop's server capacity, a specific
+percentage in a trade deal) that trivially "wouldn't transfer unchanged"
+to a different episode -- so the model answered POLICY almost every time,
+for exactly the reason test 2 was supposed to prevent. Reading gold's own
+justifications on these 53 FP rows (armasuisse's procurement failures,
+the VBS drone program, fedpol's caseload, the AFF/EFV coin-sale webshop,
+Cassis's Gaza posture twice, Amherd/VBS data security, Beat Jans twice,
+COMCO/Weko) shows gold is NOT asking "would this exact reproach transfer
+to a different episode" -- it is asking something simpler and more
+robust: is the criticism about WHAT was decided (the content, target, or
+substance of one specific measure) or about HOW the target functions as
+an organisation/individual (its competence, planning, risk management,
+organisation, leadership, communication, or character) -- even when one
+specific, named project or dossier is the article's illustration of a
+HOW-type judgment. Gold's own vocabulary makes this near-literal across
+these rows: "comportement institutionnel general", "gestion des risques",
+"pratique de l'administration", "Kompetenz und Verwaltungspraxis",
+"allgemeine Fuehrungsqualitaeten". Worth noting: this WHAT/HOW framing
+already existed, unused, in this very file's own VERIFY_SYSTEM_PROMPT
+below (the dead pass-2 prompt, inherited unchanged from
+src/step5_prompts.py and never touched by either redefinition above) --
+its POLICY/ENTITY definitions already said almost exactly this
+("disagreement about WHAT was decided" vs "disagreement about HOW the
+target carried out its ... normal functioning"). Neither of the two
+redesigns above drew on it; this one does, consciously, while rebuilding
+SYSTEM_PROMPT/USER_TEMPLATE for pass 1 from scratch -- per Maxime's
+explicit instruction, this is a full rewrite, not another layer: the
+"public-policy gate" and the "swap test" language from the two-test
+design above are REMOVED entirely, not kept alongside the new framing.
+Personnel/operational/managerial matters (armasuisse's risk-manager
+appointment, AFF/EFV's server sizing) are no longer handled by a separate
+gate -- they fall out naturally as HOW-type competence/management
+judgments under the new single test. One additional, explicitly flagged
+wrinkle: negotiation-outcome criticisms ("gave away too much", "got a bad
+deal") are ambiguous between a competence judgment on negotiating skill
+(ENTITY) and a content judgment on the deal's substance (POLICY); a
+worked warning about this is included below because two FP rows (Guy
+Parmelin, Karin Keller-Sutter) have this exact shape. For those two rows
+specifically, gold's own content_type_justification text argues FOR
+POLICY in so many words ("un choix de politique commerciale identifiable
+et nommable", "eine spezifische Angelegenheit") while the stored label is
+ENTITY -- the same gold label/justification self-contradiction pattern
+already known from the OFROU/ASTRA and VBS/Cassis/OFC-BAK/DFAE rows,
+flagged to Maxime, not something this prompt can or should chase. A third
+row (Martin Pfister/F-35) is murkier -- its own justification mixes "une
+politique specifique et nommee" with "et sa gestion" (its management) in
+the same sentence -- and is noted as a genuinely hard boundary case
+rather than a clear-cut error. Not yet re-run/confirmed on real data --
+see sbatch_step5_remote_test.sh for the next test run.
 
 scripts/step5_content_type.py picks this module instead of
 src/step5_prompts.py only when --backend litellm is used; every other
@@ -161,55 +220,59 @@ import pandas as pd
 SYSTEM_PROMPT = """\
 You are a media analysis assistant specialised in Swiss public affairs.
 You are given a newspaper article in which a specific target is criticized.
-Your task is to classify the NATURE of this criticism into ONE of two categories, using TWO
-successive tests -- do not stop at test 1 passing, and do not skip straight to test 2.
+Your task is to classify the NATURE of this criticism into ONE of two categories: POLICY or ENTITY.
 
-=== TEST 1: is this a PUBLIC POLICY matter at all? ===
+The distinction is WHAT was decided versus HOW the target functions as an organisation or
+individual.
 
-Ask first: does the criticized decision concern an official PUBLIC measure, program, rule, or
-course of action -- something by which the target exercises its public mandate toward a defined
-public, sector, or cause -- as opposed to an INTERNAL, OPERATIONAL, MANAGERIAL, or PERSONNEL
-matter (who to hire or appoint, how to organise or staff a project, technical or logistical
-execution, a spokesperson's communication style, day-to-day internal running)?
+  Policy  — the criticism targets WHAT was decided: the actual content, substance, objectives,
+            scope, target, or direction of a specific public measure, at any stage of its life
+            (it being proposed, developed, implemented, having an effect, being modified, or
+            being dropped/suppressed). The question being asked is: was THIS decision, on its own
+            merits -- given what it actually does, to whom, and why -- the right or wrong thing to
+            do? The reproach would disappear if the measure's content had been different, even if
+            the target had otherwise acted in exactly the same manner.
 
-If the matter is internal/operational/managerial/personnel, the answer is ENTITY, full stop --
-no matter how specific or deliberate that internal choice was. A decision only ever qualifies for
-POLICY if it is genuinely about a public measure or program, never about how the target runs
-itself internally.
+  Entity  — the criticism targets HOW the target functions as an actor: its competence, planning,
+            risk management, organisation, leadership, communication, staffing, internal
+            practices, track record, or character (clairvoyance, courage, honesty, morality). The
+            question being asked is: is this target GOOD AT what it does and how it conducts
+            itself -- regardless of which specific decision or episode happens to illustrate that
+            judgment? The reproach would survive even if the measure's content had been completely
+            different, as long as it had been handled in the same manner.
 
-=== TEST 2 (only reached if test 1 says "yes, genuine public-policy matter"): content vs. trait ===
+A simple way to tell them apart: try rephrasing the criticism as "the target is bad at managing,
+planning, organising, leading, or communicating" (or an equivalent character judgment: cowardly,
+dishonest, incompetent, out of touch). If that rephrasing keeps the criticism's real point intact,
+it is ENTITY, even when one specific, named project or decision is the article's illustration of
+it. If that rephrasing loses the point -- because the actual complaint is about what the decision
+itself does or fails to do, not about the target's competence or character -- it is POLICY.
 
-  Policy  — the reproach depends on the CONTENT of that specific public measure itself: whether
-            it was the right or wrong thing to do, GIVEN WHAT THAT MEASURE CONCRETELY DOES (its
-            proposal, development, implementation, effect, modification, or suppression). The
-            reproach would NOT transfer, unchanged, to a completely different measure -- it only
-            makes sense in light of what THIS specific measure actually does or fails to do.
-
-  Entity  — the reproach is a general CHARACTER or COMPETENCE judgment about the target as an
-            actor (its clairvoyance, competence, behaviour, track record, management, morality,
-            courage, honesty...) that would transfer just as well to a completely different
-            decision made by the same target in a similarly-described manner (e.g. under
-            pressure, hastily, self-servingly), regardless of what that other decision actually
-            did. A specific measure can still be the article's occasion or pretext for this kind
-            of judgment -- that alone does not make it POLICY.
-
-Swap test for TEST 2: imagine replacing the specific measure in the article with a completely
-different one, handled by the same target in a similarly-described manner. Does the exact same
-reproach still land, unchanged? If yes, you are looking at a TRAIT judgment -- ENTITY. If the
-reproach stops making sense without THIS measure's own specific content -- POLICY.
-
-Harsh phrasing (a mistake, a betrayal, bad judgment, cowardice) never decides the answer by
-itself -- apply test 1 and then test 2 to work out which category that harsh phrasing actually
-belongs to; the same harsh word can land on either side depending on what it is actually
-predicated of.
+Naming a specific policy, project, or decision does NOT by itself decide the answer, and neither
+does the tone of the criticism: a harshly-worded reproach (a mistake, a betrayal, cowardice,
+incompetence) can land on either side, depending on whether it is judging the CONTENT of a
+decision or the MANNER/CHARACTER of the actor. A single named project described in technical
+detail (cost overruns, delays, a disqualified appointee, a botched rollout) is usually evidence
+being offered FOR a competence/management judgment (ENTITY), not itself the subject of a POLICY
+judgment -- a POLICY criticism is about whether proposing, adopting, changing, or ending that
+measure was the right call given its actual purpose and effects, not about how well it was
+planned, staffed, or executed.
 
 For example:
-- "Mr X regrets that entity Z proposed to support reform X." -> POLICY: test 1 passes (reform X is a public measure); test 2: the regret depends on reform X's own content, and would not transfer unchanged to a different reform.
-- "Mr X finds entity Z really cowardly for supporting such a reform." -> ENTITY: test 1 passes, but test 2 fails -- "cowardly" would describe Z just as well had Z backed any other measure under similar pressure, regardless of that measure's content.
-- "The agency is criticized for appointing an unqualified risk manager." -> ENTITY: fails test 1 outright -- a personnel/internal-management decision, not a public policy, however specific and deliberate that appointment was.
-- "The office is criticized for under-provisioning server capacity ahead of a public coin sale." -> ENTITY: fails test 1 -- a technical/operational execution matter, not a public policy.
-- "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months, with no specific decision about the program itself being questioned." -> ENTITY: fails test 1 -- day-to-day administrative execution, not a policy choice.
-- "The agency is criticized for deciding to end the housing subsidy program despite its proven results." -> POLICY: test 1 passes (the program itself is the public measure); test 2 passes -- the reproach depends on THIS program's own track record, and would not transfer unchanged to ending a different, unproven program.\
+- "Mr X regrets that entity Z proposed to support reform X." -> POLICY: the reproach concerns the content of this specific choice (supporting reform X), not Z's competence or character.
+- "Mr X finds entity Z really cowardly for supporting such a reform." -> ENTITY: "cowardly" is a character judgment about Z that would apply just as well had Z made any other decision under similar pressure.
+- "The agency's procurement project suffered cost overruns, delays, and a disqualified risk manager due to poor planning and risk management." -> ENTITY: a judgment about the agency's competence in managing projects, illustrated by this one project -- the same complaint would be made of a different project handled with the same poor planning.
+- "The office's online shop crashed due to insufficient server capacity, and employees may have been favoured in the allocation that followed." -> ENTITY: a judgment about the office's operational competence and conduct, not about the public measure's content.
+- "The ministry's housing subsidy program is criticized for chronic processing delays and errors that left applicants waiting months." -> ENTITY: a judgment about how the program is run day to day, not about the program's content.
+- "The agency is criticized for deciding to end the housing subsidy program despite its proven results." -> POLICY: the reproach is precisely about the content of this choice (ending a program that works), not about competence.
+- "The minister is criticized for a prolonged, cautious diplomatic posture throughout an international crisis." -> ENTITY: a judgment of the minister's general conduct and character (timidity, lack of resolve) sustained over time, not about the content of one specific, named decision.
+- "The minister is criticized because a specific proposed decision -- to recognise X, or to sign agreement Y -- was the wrong call." -> POLICY: the reproach is about the content of that one specific, nameable decision.
+
+Negotiation outcomes are a common trap: a critic complaining that a negotiator "gave away too
+much" or "got a bad deal" is usually judging that person's negotiating SKILL (ENTITY) -- the same
+complaint would be made of any outcome perceived as weak, regardless of what was actually
+negotiated -- unless the article's own reproach is specifically about the agreement's terms and
+their concrete consequences on their own merits (POLICY).\
 """
 
 USER_TEMPLATE = """\
@@ -218,24 +281,27 @@ In the article below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Classify the NATURE of this criticism using TWO successive tests -- do not stop at test 1 passing, and do not skip straight to test 2.
+Classify the NATURE of this criticism: is it about WHAT "{keyword}" decided, or about HOW "{keyword}" functions as an organisation or individual?
 
-TEST 1 -- is this a PUBLIC POLICY matter at all? Does the criticized decision concern an official PUBLIC measure, program, rule, or course of action by "{keyword}" -- as opposed to an INTERNAL, OPERATIONAL, MANAGERIAL, or PERSONNEL matter (who to hire or appoint, how to organise or staff a project, technical or logistical execution, a spokesperson's communication style, day-to-day internal running)? If it is internal/operational/managerial/personnel, the answer is ENTITY -- no matter how specific or deliberate that internal choice was.
+POLICY means the criticism targets the actual content, substance, objectives, scope, or direction of a specific public measure (its proposal, development, implementation, effect, modification, or suppression). Was THIS decision, given what it actually does, to whom, and why, the right or wrong thing to do? The reproach would disappear if the measure's content had been different, even if "{keyword}" had otherwise acted in exactly the same manner.
 
-TEST 2 (only if test 1 says yes) -- content vs. trait. Does the reproach depend on the CONTENT of that specific public measure itself -- whether it was the right or wrong thing to do, GIVEN WHAT THAT MEASURE CONCRETELY DOES -- such that the reproach would NOT transfer, unchanged, to a completely different measure? That is POLICY. Or is the reproach a general CHARACTER or COMPETENCE judgment about "{keyword}" as an actor (its clairvoyance, competence, behaviour, track record, management, morality, courage, honesty...) that would transfer just as well to a totally different decision handled in a similarly-described manner, regardless of what that other decision actually did? That is ENTITY, even if one specific measure is the article's occasion for the remark.
+ENTITY means the criticism targets HOW "{keyword}" functions as an actor: its competence, planning, risk management, organisation, leadership, communication, staffing, internal practices, track record, or character (clairvoyance, courage, honesty, morality). Is "{keyword}" good at what it does and how it conducts itself -- regardless of which specific decision or episode illustrates that judgment? The reproach would survive even if the measure's content had been completely different, as long as it had been handled in the same manner.
 
-Swap test for TEST 2: imagine replacing the specific measure with a completely different one, handled by "{keyword}" in a similarly-described manner. Does the exact same reproach still land, unchanged? If yes -- a trait judgment, ENTITY. If the reproach stops making sense without THIS measure's own specific content -- POLICY.
+A simple test: try rephrasing the criticism as «"{keyword}" is bad at managing, planning, organising, leading, or communicating» (or a character judgment: cowardly, dishonest, incompetent, out of touch). If that rephrasing keeps the criticism's real point intact, this is ENTITY, even when one specific, named project or decision illustrates it. If the rephrasing loses the point -- because the real complaint is about what the decision itself does or fails to do -- this is POLICY.
 
-Harsh phrasing (a mistake, a betrayal, bad judgment, cowardice) never decides the answer by itself -- apply test 1 and then test 2; the same harsh word can land on either side depending on what it is actually predicated of.
+Naming a specific policy, project, or decision does not by itself decide the answer, and neither does harsh phrasing (a mistake, a betrayal, cowardice, incompetence) -- these can land on either side depending on whether the content of a decision, or the manner/character of "{keyword}", is what is actually being judged. A single named project described in technical detail (cost overruns, delays, a disqualified appointee, a botched rollout) is usually evidence offered FOR a competence judgment (ENTITY), not itself a POLICY question.
 
 For example:
-- "Mr X regrets that "{keyword}" proposed to support reform X." -> POLICY: test 1 passes (a public measure); test 2: the regret depends on reform X's own content.
-- "Mr X finds "{keyword}" really cowardly for supporting such a reform." -> ENTITY: test 1 passes, but test 2 fails -- "cowardly" would describe "{keyword}" just as well for any other measure backed under similar pressure.
-- "The agency is criticized for appointing an unqualified risk manager." -> ENTITY: fails test 1 -- a personnel decision, not a public policy.
-- "The ministry's housing subsidy program is criticized for chronic processing delays, with no specific decision about the program itself being questioned." -> ENTITY: fails test 1 -- day-to-day administrative execution, not a policy choice.
-- "The agency is criticized for deciding to end the housing subsidy program despite its proven results." -> POLICY: test 1 passes (the program is the public measure); test 2 passes -- the reproach depends on THIS program's own track record.
+- "Mr X regrets that "{keyword}" proposed to support reform X." -> POLICY: the reproach concerns the content of that specific choice.
+- "Mr X finds "{keyword}" really cowardly for supporting such a reform." -> ENTITY: "cowardly" is a character judgment that would apply to "{keyword}" regardless of which decision prompted it.
+- "A procurement project suffered cost overruns, delays, and a disqualified risk manager due to poor planning." -> ENTITY: a judgment of "{keyword}"'s competence in managing projects, illustrated by this one project.
+- "The housing subsidy program is criticized for chronic processing delays and errors." -> ENTITY: how the program is run day to day, not its content.
+- ""{keyword}" is criticized for deciding to end the housing subsidy program despite its proven results." -> POLICY: the reproach is precisely about the content of that choice.
+- ""{keyword}" is criticized for a prolonged, cautious posture throughout an international crisis." -> ENTITY: a judgment of general conduct and character sustained over time, not of one specific decision's content.
 
-First, in one or two sentences, justify your answer, naming which test decided it (test 1 or test 2) and why.
+Watch out for negotiation outcomes: a critic saying "{keyword}" "gave away too much" or "got a bad deal" is usually judging negotiating skill (ENTITY), unless the reproach is specifically about the agreement's terms and their concrete consequences on their own merits (POLICY).
+
+First, in one or two sentences, justify your answer by saying whether the criticism is fundamentally about WHAT was decided or HOW "{keyword}" acted.
 Then, on a new line, answer with exactly one word: POLICY or ENTITY.\
 """
 
