@@ -123,7 +123,7 @@ sys.path.append(str(ROOT))
 
 import pandas as pd
 
-from src.client import TransformersClient, LLMConfig
+from src.client import build_client
 from src.runner import RunConfig, run_llm_dataframe
 from src.step4b_config import build_mask
 from src.step4b_logit_prompts import (
@@ -134,6 +134,27 @@ from src.step4b_logit_prompts import (
     build_validation_prompt,
     build_validation_calibration_prompt,
     letters_for_order,
+)
+# 2026-11-24: --backend litellm (remote API models via the UNIL/CSCS proxy,
+# e.g. the Apertus-70B family) uses its OWN prompt module
+# (src/step4b_logit_prompts_remote.py), selected right after argparse below
+# -- same pattern as scripts/step3_criticism_detection.py, see
+# src/step3_prompts_remote.py's module docstring for the full rationale and
+# src/step4b_logit_prompts_remote.py's own docstring for this file's version
+# of it. src/step4b_logit_prompts.py (the production vllm/transformers, 8B,
+# local-GPU path) is completely unaffected, byte-for-byte, by anything
+# imported here. CATEGORIES and letters_for_order are NOT re-imported from
+# the remote module: CATEGORIES is the fixed set of 6 category labels (not
+# prompt wording -- identical in both modules, and PROB_COLS below is built
+# from it at import time, before --backend is even known), and
+# letters_for_order is a trivial order/letter-index helper, not prompt text.
+# Only the actual wording-bearing prompt builders are backend-conditional.
+from src.step4b_logit_prompts_remote import (
+    build_question_prompt as build_question_prompt_remote,
+    build_calibration_prompt as build_calibration_prompt_remote,
+    build_summary_prompt as build_summary_prompt_remote,
+    build_validation_prompt as build_validation_prompt_remote,
+    build_validation_calibration_prompt as build_validation_calibration_prompt_remote,
 )
 from src.step4b_logit_utils import (
     softmax_restricted,
@@ -181,19 +202,25 @@ def parse_summary_output(raw: str) -> dict:
     return {SUMMARY_TEXT_COL: text if text else pd.NA}
 
 
-def compute_calibration(client, candidate_letters, max_input_tokens, context_label: str) -> dict:
+def compute_calibration(client, candidate_letters, max_input_tokens, context_label: str,
+                         build_calibration_prompt_fn=build_calibration_prompt) -> dict:
     """p0(category): this category's question's own intrinsic yes-bias,
     measured ONCE (order-averaged) on the 'empty' variant of the question
     -- see src/step4b_logit_prompts.build_calibration_prompt. Independent
     of every row, so this never needs to be re-run per row, and is cheap
     enough (6 categories x 2 orders = 12 forward passes) to simply
     recompute at the start of every SLURM array task rather than share
-    across tasks."""
+    across tasks.
+
+    2026-11-24: build_calibration_prompt_fn defaults to the production
+    (vllm/transformers) prompt builder, byte-for-byte unaffected; main()
+    passes the remote one explicitly when --backend litellm is used -- see
+    the src/step4b_logit_prompts_remote import above."""
     prompts = []
     meta = []  # (category, order)
     for cat in CATEGORIES:
         for order in (1, 2):
-            prompts.append(build_calibration_prompt(cat, order, context_label=context_label))
+            prompts.append(build_calibration_prompt_fn(cat, order, context_label=context_label))
             meta.append((cat, order))
 
     raw = client.logprob_many(
@@ -217,7 +244,8 @@ def compute_calibration(client, candidate_letters, max_input_tokens, context_lab
     return p0
 
 
-def compute_validation_calibration(client, candidate_letters, max_input_tokens, context_label: str) -> dict:
+def compute_validation_calibration(client, candidate_letters, max_input_tokens, context_label: str,
+                                    build_validation_calibration_prompt_fn=build_validation_calibration_prompt) -> dict:
     """p0_val(claimed_category): pass 3's own question has a different
     shape than pass 2's (one holistic true/false claim instead of 6
     independent yes/no ones), so it gets its own intrinsic yes("true")-
@@ -225,12 +253,18 @@ def compute_validation_calibration(client, candidate_letters, max_input_tokens, 
     empty-summary variant -- see
     src/step4b_logit_prompts.build_validation_calibration_prompt. Same
     cost as compute_calibration (6 categories x 2 orders = 12 forward
-    passes)."""
+    passes).
+
+    2026-11-24: build_validation_calibration_prompt_fn defaults to the
+    production (vllm/transformers) prompt builder, byte-for-byte
+    unaffected; main() passes the remote one explicitly when --backend
+    litellm is used -- see the src/step4b_logit_prompts_remote import
+    above."""
     prompts = []
     meta = []  # (claimed_category, order)
     for cat in CATEGORIES:
         for order in (1, 2):
-            prompts.append(build_validation_calibration_prompt(cat, order, context_label=context_label))
+            prompts.append(build_validation_calibration_prompt_fn(cat, order, context_label=context_label))
             meta.append((cat, order))
 
     raw = client.logprob_many(
@@ -264,10 +298,37 @@ def main() -> int:
     ap.add_argument("--n_rows",       type=int, default=0)
 
     # --- Model ---
-    ap.add_argument("--model_path",        required=True)
-    ap.add_argument("--dtype",             required=True, choices=["bf16", "fp16", "auto"])
-    ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
-    ap.add_argument("--trust_remote_code", action="store_true")
+    # 2026-11-24: --backend "litellm" added alongside "vllm"/"transformers" --
+    # sends requests to an OpenAI-compatible gateway (src/client_remote.py)
+    # instead of loading a model locally, e.g. swiss-ai/Apertus-v1.5-70B
+    # hosted at CSCS via UNIL's litellm proxy on a plain CPU allocation. For
+    # this backend, --model_path doubles as the remote model identifier
+    # rather than a local filesystem path, and --dtype/--trust_remote_code
+    # are simply ignored. See src/client.py's build_client() and
+    # src/client_remote.py's module docstring. Same change as
+    # scripts/step3_criticism_detection.py. Both the summary pre-pass
+    # (generation) and passes 2/3 (logit-probing, via client.logprob_many)
+    # work unchanged through this client for either backend.
+    ap.add_argument("--model_path",        required=True,
+                    help="Local model path (vllm/transformers backends) or remote model "
+                         "identifier, e.g. 'swiss-ai/Apertus-v1.5-70B' (litellm backend).")
+    ap.add_argument("--dtype",             default="bf16", choices=["bf16", "fp16", "auto"],
+                    help="Ignored for --backend litellm.")
+    ap.add_argument("--backend",           default="transformers",
+                    choices=["vllm", "transformers", "litellm"])
+    ap.add_argument("--trust_remote_code", action="store_true",
+                    help="Ignored for --backend litellm.")
+
+    # --- Remote API (--backend litellm only) ---
+    ap.add_argument("--api_base",    default="https://litellm.dcsr.unil.ch/v1",
+                    help="Base URL for the OpenAI-compatible gateway (--backend litellm only).")
+    ap.add_argument("--api_key_env", default="UNIL_LITELLM_API_KEY",
+                    help="Name of the env var holding the API key (--backend litellm only). "
+                         "Never hardcode the key itself -- export it before launching.")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="Concurrent HTTP requests (--backend litellm only) -- replaces "
+                         "--batch_size/--summary_batch_size's role as the parallelism knob for "
+                         "this backend, since there is no local GPU batch to size.")
 
     # --- Pre-pass: summarize (plain generation, reads the full article) ---
     ap.add_argument("--summary_batch_size",      type=int,   default=8)
@@ -317,6 +378,26 @@ def main() -> int:
     if len(candidate_letters) != 2:
         raise ValueError(f"--candidate_letters must give exactly 2 letters, got {candidate_letters!r}")
 
+    # 2026-11-24: pick the prompt module for the summary pre-pass, pass 2's
+    # question prompts, and pass 3's validation prompts based on --backend --
+    # see the src/step4b_logit_prompts_remote import above. vllm/transformers
+    # (the production 8B/local-GPU path) keep using src/step4b_logit_prompts.py
+    # exactly as before, byte-for-byte unaffected. CATEGORIES and
+    # letters_for_order are shared/unconditional -- see that import's own
+    # comment. Same pattern as scripts/step3_criticism_detection.py.
+    if args.backend == "litellm":
+        active_build_summary_prompt = build_summary_prompt_remote
+        active_build_question_prompt = build_question_prompt_remote
+        active_build_calibration_prompt = build_calibration_prompt_remote
+        active_build_validation_prompt = build_validation_prompt_remote
+        active_build_validation_calibration_prompt = build_validation_calibration_prompt_remote
+    else:
+        active_build_summary_prompt = build_summary_prompt
+        active_build_question_prompt = build_question_prompt
+        active_build_calibration_prompt = build_calibration_prompt
+        active_build_validation_prompt = build_validation_prompt
+        active_build_validation_calibration_prompt = build_validation_calibration_prompt
+
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
         task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
@@ -360,14 +441,7 @@ def main() -> int:
             df[col] = pd.Series(pd.NA, index=df.index, dtype="object")
 
     # --- LLM client ---
-    client = TransformersClient(
-        LLMConfig(
-            model_path=args.model_path,
-            dtype=args.dtype,
-            trust_remote_code=args.trust_remote_code,
-            backend=args.backend,
-        )
-    )
+    client = build_client(args)
 
     # =========================================================================
     # 2026-10-28 -- diagnostic logging, pas une etape du pipeline.
@@ -446,7 +520,7 @@ def main() -> int:
         client=client,
         system_prompt="",
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
-        build_prompt_fn=lambda row, col: build_summary_prompt(row, col),
+        build_prompt_fn=lambda row, col: active_build_summary_prompt(row, col),
         parse_fn=parse_summary_output,
         output_cols=[SUMMARY_TEXT_COL],
         skip_if_already_filled=SUMMARY_TEXT_COL,
@@ -470,7 +544,8 @@ def main() -> int:
     # will use, so the calibration prompt matches the real ones exactly
     # except for row-specific content. ---
     print("[calibration] Computing p0(category) on the empty-summary variant...", flush=True)
-    p0 = compute_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL)
+    p0 = compute_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
+                              build_calibration_prompt_fn=active_build_calibration_prompt)
     for cat in CATEGORIES:
         print(f"  p0[{cat}] = {p0[cat]:.4f}")
 
@@ -486,7 +561,7 @@ def main() -> int:
             for order in (1, 2):
                 flat_keys.append((row_idx, cat, order))
                 flat_prompts.append(
-                    build_question_prompt(row, SUMMARY_TEXT_COL, cat, order, context_label=SUMMARY_CONTEXT_LABEL)
+                    active_build_question_prompt(row, SUMMARY_TEXT_COL, cat, order, context_label=SUMMARY_CONTEXT_LABEL)
                 )
 
     print(f"[pipeline] {len(flat_prompts):,} total (row, category, order) prompts "
@@ -609,7 +684,8 @@ def main() -> int:
               f"resolved rows...", flush=True)
 
         print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
-        p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL)
+        p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
+                                                 build_validation_calibration_prompt_fn=active_build_validation_calibration_prompt)
         for cat in CATEGORIES:
             print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
 
@@ -621,7 +697,7 @@ def main() -> int:
             for order in (1, 2):
                 val_flat_keys.append((row_idx, order))
                 val_flat_prompts.append(
-                    build_validation_prompt(row, SUMMARY_TEXT_COL, claimed_category, order, context_label=SUMMARY_CONTEXT_LABEL)
+                    active_build_validation_prompt(row, SUMMARY_TEXT_COL, claimed_category, order, context_label=SUMMARY_CONTEXT_LABEL)
                 )
 
         print(f"[validation] {len(val_flat_prompts):,} total (row, order) validation prompts "
@@ -751,6 +827,14 @@ def main() -> int:
         if Path(p).exists():
             Path(p).unlink()
             print(f"[checkpoint] Deleted {p}")
+
+    # 2026-11-24: usage telemetry for the remote (--backend litellm) client --
+    # pure observability, unrelated to this run's actual results. The local
+    # TransformersClient has no print_stats(), so this is a no-op for the
+    # GPU path -- see src/client_remote.py's module docstring. Same addition
+    # as scripts/step3_criticism_detection.py.
+    if hasattr(client, "print_stats"):
+        client.print_stats()
 
     return 0
 

@@ -155,12 +155,28 @@ sys.path.append(str(ROOT))
 
 import pandas as pd
 
-from src.client import TransformersClient, LLMConfig
+from src.client import build_client
 from src.runner import run_llm_dataframe, RunConfig
 from src.step4a_prompts import (
     SYSTEM_PROMPT, build_user_prompt,
     VERIFY_SYSTEM_PROMPT, build_verify_prompt,
     FORCE_SYSTEM_PROMPT, build_force_prompt,
+)
+# 2026-11-24: --backend litellm (remote API models via the UNIL/CSCS proxy,
+# e.g. the Apertus-70B family) uses its OWN prompt module
+# (src/step4a_prompts_remote.py), selected right after argparse below -- same
+# pattern as scripts/step3_criticism_detection.py, see
+# src/step3_prompts_remote.py's module docstring for the full rationale and
+# src/step4a_prompts_remote.py's own docstring for this file's version of it.
+# src/step4a_prompts.py (the production vllm/transformers, 8B, local-GPU
+# path) is completely unaffected, byte-for-byte, by anything imported here.
+# Pass 2 ("forced re-search") is an active part of this step's pipeline
+# (unlike step3/step5/step6's pass 2), so its remote counterpart is also
+# aliased below, alongside pass 1's.
+from src.step4a_prompts_remote import (
+    SYSTEM_PROMPT as SYSTEM_PROMPT_REMOTE, build_user_prompt as build_user_prompt_remote,
+    VERIFY_SYSTEM_PROMPT as VERIFY_SYSTEM_PROMPT_REMOTE, build_verify_prompt as build_verify_prompt_remote,
+    FORCE_SYSTEM_PROMPT as FORCE_SYSTEM_PROMPT_REMOTE, build_force_prompt as build_force_prompt_remote,
 )
 from src.step4a_config import build_mask
 from src.verify_utils import parse_label_only, parse_draft_labeled
@@ -228,10 +244,35 @@ def main() -> int:
     ap.add_argument("--n_rows",       type=int, default=0)
 
     # --- Model ---
-    ap.add_argument("--model_path",        required=True)
-    ap.add_argument("--dtype",             required=True, choices=["bf16", "fp16", "auto"])
-    ap.add_argument("--backend",           default="transformers", choices=["vllm", "transformers"])
-    ap.add_argument("--trust_remote_code", action="store_true")
+    # 2026-11-24: --backend "litellm" added alongside "vllm"/"transformers" --
+    # sends requests to an OpenAI-compatible gateway (src/client_remote.py)
+    # instead of loading a model locally, e.g. swiss-ai/Apertus-v1.5-70B
+    # hosted at CSCS via UNIL's litellm proxy on a plain CPU allocation. For
+    # this backend, --model_path doubles as the remote model identifier
+    # rather than a local filesystem path, and --dtype/--trust_remote_code
+    # are simply ignored. See src/client.py's build_client() and
+    # src/client_remote.py's module docstring. Same change as
+    # scripts/step3_criticism_detection.py.
+    ap.add_argument("--model_path",        required=True,
+                    help="Local model path (vllm/transformers backends) or remote model "
+                         "identifier, e.g. 'swiss-ai/Apertus-v1.5-70B' (litellm backend).")
+    ap.add_argument("--dtype",             default="bf16", choices=["bf16", "fp16", "auto"],
+                    help="Ignored for --backend litellm.")
+    ap.add_argument("--backend",           default="transformers",
+                    choices=["vllm", "transformers", "litellm"])
+    ap.add_argument("--trust_remote_code", action="store_true",
+                    help="Ignored for --backend litellm.")
+
+    # --- Remote API (--backend litellm only) ---
+    ap.add_argument("--api_base",    default="https://litellm.dcsr.unil.ch/v1",
+                    help="Base URL for the OpenAI-compatible gateway (--backend litellm only).")
+    ap.add_argument("--api_key_env", default="UNIL_LITELLM_API_KEY",
+                    help="Name of the env var holding the API key (--backend litellm only). "
+                         "Never hardcode the key itself -- export it before launching.")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="Concurrent HTTP requests (--backend litellm only) -- replaces "
+                         "--batch_size's role as the parallelism knob for this backend, since "
+                         "there is no local GPU batch to size.")
 
     # --- Inference: pass 1 (draft, reads the full article) ---
     ap.add_argument("--batch_size",        required=True, type=int)
@@ -317,6 +358,29 @@ def main() -> int:
     if len(coherence_candidate_letters) != 2:
         raise ValueError(f"--coherence_candidate_letters must give exactly 2 letters, got {coherence_candidate_letters!r}")
 
+    # 2026-11-24: pick the prompt module for pass 1/pass 2 based on
+    # --backend -- see the src/step4a_prompts_remote import above.
+    # vllm/transformers (the production 8B/local-GPU path) keep using
+    # src/step4a_prompts.py exactly as before, byte-for-byte unaffected.
+    # Pass 3 (src/step4a_pass2_coherence_logit_prompts.py) is a separate,
+    # SHARED file used identically regardless of backend -- see that
+    # import's own comment above. Same pattern as
+    # scripts/step3_criticism_detection.py.
+    if args.backend == "litellm":
+        active_system_prompt = SYSTEM_PROMPT_REMOTE
+        active_build_user_prompt = build_user_prompt_remote
+        active_verify_system_prompt = VERIFY_SYSTEM_PROMPT_REMOTE
+        active_build_verify_prompt = build_verify_prompt_remote
+        active_force_system_prompt = FORCE_SYSTEM_PROMPT_REMOTE
+        active_build_force_prompt = build_force_prompt_remote
+    else:
+        active_system_prompt = SYSTEM_PROMPT
+        active_build_user_prompt = build_user_prompt
+        active_verify_system_prompt = VERIFY_SYSTEM_PROMPT
+        active_build_verify_prompt = build_verify_prompt
+        active_force_system_prompt = FORCE_SYSTEM_PROMPT
+        active_build_force_prompt = build_force_prompt
+
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
         task_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
@@ -383,14 +447,7 @@ def main() -> int:
             df[col] = pd.Series(pd.NA, index=df.index, dtype=dtype)
 
     # --- LLM client ---
-    client = TransformersClient(
-        LLMConfig(
-            model_path=args.model_path,
-            dtype=args.dtype,
-            trust_remote_code=args.trust_remote_code,
-            backend=args.backend,
-        )
-    )
+    client = build_client(args)
 
     # --- Pass 1: draft (justification + first-guess label, from the article) ---
     draft_cfg = RunConfig(
@@ -405,9 +462,9 @@ def main() -> int:
         df=df,
         cfg=draft_cfg,
         client=client,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=active_system_prompt,
         select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col),
-        build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+        build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
         parse_fn=parse_draft_output,
         output_cols=DRAFT_COLS,
         skip_if_already_filled="source_attribution_draft",
@@ -444,9 +501,9 @@ def main() -> int:
             df=df,
             cfg=retry_cfg,
             client=client,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=active_system_prompt,
             select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_attribution_draft"].isna(),
-            build_prompt_fn=lambda row, col: build_user_prompt(row, col),
+            build_prompt_fn=lambda row, col: active_build_user_prompt(row, col),
             parse_fn=parse_draft_output,
             output_cols=DRAFT_COLS,
             skip_if_already_filled="source_attribution_draft",
@@ -492,9 +549,9 @@ def main() -> int:
             df=df,
             cfg=force_cfg,
             client=client,
-            system_prompt=FORCE_SYSTEM_PROMPT,
+            system_prompt=active_force_system_prompt,
             select_mask_fn=lambda df_: build_mask(df_, text_col=args.text_col) & df_["source_attribution_draft"].isna(),
-            build_prompt_fn=lambda row, col: build_force_prompt(row, col),
+            build_prompt_fn=lambda row, col: active_build_force_prompt(row, col),
             parse_fn=parse_force_output,
             output_cols=ALL_COLS,
             skip_if_already_filled="source_attribution_draft",
@@ -568,9 +625,9 @@ def main() -> int:
             df=df,
             cfg=pass2_cfg,
             client=client,
-            system_prompt=VERIFY_SYSTEM_PROMPT,
+            system_prompt=active_verify_system_prompt,
             select_mask_fn=lambda df_, _m=pass2_mask: _m,
-            build_prompt_fn=lambda row, col: build_verify_prompt(row, col),
+            build_prompt_fn=lambda row, col: active_build_verify_prompt(row, col),
             parse_fn=parse_pass2_output,
             output_cols=PASS2_COLS,
             skip_if_already_filled="source_attribution_pass2_answer",
@@ -801,6 +858,14 @@ def main() -> int:
     if Path(checkpoint_path).exists():
         Path(checkpoint_path).unlink()
         print(f"[checkpoint] Deleted {checkpoint_path}")
+
+    # 2026-11-24: usage telemetry for the remote (--backend litellm) client --
+    # pure observability, unrelated to this run's actual results. The local
+    # TransformersClient has no print_stats(), so this is a no-op for the
+    # GPU path -- see src/client_remote.py's module docstring. Same addition
+    # as scripts/step3_criticism_detection.py.
+    if hasattr(client, "print_stats"):
+        client.print_stats()
 
     return 0
 

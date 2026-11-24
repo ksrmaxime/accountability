@@ -203,9 +203,29 @@ python scripts/step3_criticism_detection.py \
   "${VALIDATION_THRESHOLD_NO_TO_YES_FLAG[@]}"
 
 echo "Job finished."
-echo ""
-echo "No auto-chain into step4a: this is a standalone test run, kept separate"
-echo "from the GPU pipeline on purpose so the two can be compared. Once you've"
-echo "looked at data/output/step3_remote/ and decided this is worth keeping,"
-echo "chain it manually, e.g.:"
-echo "  sbatch sbatch_step4a_array.sh <path to this run's merged parquet>"
+
+# -- Auto-chain -----------------------------------------------------------------
+# 2026-11-24: re-created at Maxime's request, now that the remote/litellm
+# backend has its own prompt fork and sbatch script for every later step
+# (step4a, step4b_logit, step5, step6 -- src/stepX_prompts_remote.py +
+# sbatch_stepX_remote_test.sh, each a byte-identical duplicate of the
+# production prompt until deliberately tuned). This is the single-job
+# equivalent of the classic pipeline's sbatch_merge_step3.sh -> `sbatch
+# sbatch_step4a_array.sh ${MERGED_PARQUET}` line: this script's own output
+# IS already the one file the next step needs (--task_id 0 --num_tasks 1
+# means there is no array to merge), so it is handed straight to
+# sbatch_step4a_remote_test.sh, carrying MODEL_PATH forward so the whole
+# chained run stays on one consistent model end to end. This remote chain
+# still writes to its own data/output/*_remote/ directories throughout, so
+# it never collides with or gets confused for the GPU pipeline's own
+# (unchained from this one) output.
+OUTPUT_PARQUET="${OUTPUT_BASE}_task0_job${SLURM_JOB_ID}.parquet"
+if [[ -f "$OUTPUT_PARQUET" ]]; then
+    sbatch "${WORKDIR}/sbatch_step4a_remote_test.sh" "${OUTPUT_PARQUET}" "${MODEL_PATH}"
+    echo "[chain] -> sbatch_step4a_remote_test.sh submitted (input: ${OUTPUT_PARQUET})"
+else
+    echo "[chain] WARNING: expected output ${OUTPUT_PARQUET} not found -- NOT chaining to"
+    echo "[chain] sbatch_step4a_remote_test.sh. Check the log above for errors and, if the run"
+    echo "[chain] actually succeeded under a different path, chain manually:"
+    echo "[chain]   sbatch sbatch_step4a_remote_test.sh <path> ${MODEL_PATH}"
+fi
