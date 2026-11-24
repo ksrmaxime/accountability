@@ -72,9 +72,99 @@ with a worked negative example mirroring the Swissmedic/BLV mix-up; (2)
 a closing check-before-answering reminder that a justification/defense
 already identified in the model's own reasoning must be counted as YES
 regardless of where in the article it appears or how it is framed --
-aimed at the DETEC/EFD-style self-contradictions. Not yet re-run/
-confirmed on real data -- see sbatch_step6_remote_test.sh for the next
-test run.
+aimed at the DETEC/EFD-style self-contradictions. CONFIRMED on
+job20934804: accuracy 79.8%->83.7%, F1 0.769->0.810, recall 66.7%->72.7%,
+precision 90.9%->91.4%. No negative side effects observed -- but see the
+next entry below, which found this fix did not fully resolve either of
+the two problems it targeted, plus two further, distinct patterns in the
+same error set.
+
+2026-11-24 second reinforcement pass (USER_TEMPLATE only): Maxime asked
+for job20934804's own 15 remaining errors (12 FN, 3 FP) to be read in
+turn, even though the run above had already improved on job20905947. The
+DDPS/VBS Ritter gold error and the two accepted action-as-response
+disagreements (Baume-Schneider's declined round table, the EFD's legal
+appeal) are unchanged, same rows, same verdict as before (gold error /
+deliberate disagreement, not touched). Four more FN are the same kind of
+genuine retrieval miss already accepted above (Parmelin, armasuisse's
+drone reassurance, the SEM citing case law, the SRC director's telework
+explanation) -- still not chased by design. The rest split into two
+patterns NOT fixed by the first reinforcement pass above, plus the
+clearest new finding being a reciprocal gap in the organisational-link
+rule:
+
+  (a) Three FN (fedpol/Theimer, DETEC's parking-measure reversal, the
+      EFD/UBS bonus defense) are the EXACT self-contradiction the closing
+      reminder above was meant to catch, still happening: the model's own
+      justification states something that squarely fits this prompt's own
+      definition of a response (fedpol "confirmed the existence of
+      divergences", DETEC's privacy/local-competence rationale, the
+      EFD/UBS "managers were responsible" defense) and still answers NO.
+      Root cause this time: the 2026-11-24 "SAME reproach" paragraph
+      above, in fixing the Rosti/NDB/Swissmedic off-topic FPs, swung too
+      far -- the model now also demands the credited statement match the
+      EXACT angle/vocabulary of the criticism (DETEC didn't say "climate",
+      the EFD didn't say "legal basis"), when in gold's own practice a
+      defense of the SAME underlying decision on DIFFERENT grounds than
+      the critics raised still counts. The distinction gold actually
+      draws is same DECISION vs. different decision/topic, not same
+      WORDING vs. different wording -- the "SAME reproach" paragraph
+      needed a worked example showing a same-decision/different-grounds
+      case as a positive (counts), not only negative (off-topic) examples.
+  (b) One FP (Albert Rosti, Trede's clientele-politics accusation) is a
+      near-exact repeat of the ORIGINAL Rosti-style diagnosis the first
+      reinforcement pass targeted -- the SAME reproach paragraph reduced
+      this failure mode on net (precision still rose 90.9%->91.4%) but did
+      not eliminate this specific shape. A second, sharper worked example
+      naming this exact confusion (defending a different, named proposal
+      in the same article while never addressing the specific accusation
+      at hand) was added to pressure-test it further.
+  (c) One FP (CDF/EFK) is a distinct, previously-unseen shape: Armasuisse
+      publicly dismisses/rejects the CDF's warning, accusing it of
+      endangering the Confederation's interests -- the model credited this
+      as "a response from the CDF" to the criticism directed at the CDF,
+      when it is the opposite: a different party's REACTION AGAINST the
+      criticised entity, not a statement FROM it or on its behalf. The
+      existing organisational-link paragraph only ever asks "does this
+      speaker count as speaking FOR {keyword}" -- it never explicitly
+      rules out crediting a statement that instead argues AGAINST
+      {keyword} from someone else entirely, even when that statement is
+      topically about the exact same episode.
+  (d) Two FN (Viola Amherd's justification of VBS's handling of
+      Tuscher/data-security criticized indirectly as "not attributed to
+      her"; and, in the mirror direction, Amherd's own acknowledgment of
+      VBS's problems not counted as a VBS response because she is read as
+      "a politician... presumably from another department") are the same
+      underlying gap, in both directions, on the literal same minister/
+      department pair: the organisational-link paragraph above only
+      illustrates one direction (an office/unit speaking for its
+      minister) and never states the reverse -- that a minister's own
+      statement, given in their capacity as the head of a named
+      department, counts as a response from that department, and that a
+      department's statement counts for the person the article
+      identifies as having headed it. Because this dataset's own rows
+      alternate the SAME real-world actor between a person-keyword and a
+      department-keyword (literally "Viola Amherd" and "DDPS/VBS" here),
+      this one-directional gap fires predictably on both sides of that
+      same pair.
+
+Fix (two targeted additions, both discussed with Maxime before writing):
+(1) the organisational-link paragraph is extended with an explicit
+reciprocal rule -- a department/office's statement counts for the person
+the article identifies as having headed/led it, and that person's own
+statement, given in that capacity, counts for the department/office --
+plus a new, separate carve-out stating that a statement from a different
+party that reacts to, rebuts, or argues against "{keyword}" does not
+count as "{keyword}" responding, however closely it addresses the same
+episode (the CDF/Armasuisse shape); (2) the "SAME reproach" paragraph
+gets one new positive worked example (a reversal justified on different
+grounds than the critics raised still counts, because it is the SAME
+decision) alongside its existing negative ones, to stop the model from
+silently requiring wording/angle equivalence, plus one sharper negative
+example pressure-testing the Rosti shape specifically (defending a
+different, explicitly named proposal in the same piece without ever
+addressing the actual accusation). Not yet re-run/confirmed on real data
+-- see sbatch_step6_remote_test.sh for the next test run.
 
 scripts/step6_admin_response.py picks this module instead of
 src/step6_prompts.py only when --backend litellm is used; every other
@@ -103,7 +193,13 @@ Count as a response: a direct statement from "{keyword}" itself; a statement giv
 
 When such a response comes from an office, spokesperson, or minister rather than "{keyword}" by name, decide whether that speaker counts for "{keyword}" using only what the article itself states -- look for an explicit link written in the text (for example, "Bundesamt X von Bundesrat {keyword}", "{keyword}'s department/office", or a shared ministry named earlier in the article), not your own assumptions about how an administration is organised. If the article instead marks the speaker as belonging to a different level or place (a canton, a different country, an unrelated body) even under a similar-sounding title, that speaker's statement does not count for "{keyword}" -- this includes a different federal office with related subject-matter expertise (for example, a statement from a different, separately-named agency about a related technical question does not count for "{keyword}" unless the article itself explicitly ties that agency's statement to "{keyword}").
 
-The statement you count must address the SAME reproach you are evaluating here, not a different criticism, a different topic, or only one narrow part of a broader accusation while leaving its actual substance untouched. "{keyword}" (or the article) covering other matters elsewhere in the piece, or reacting to only a side aspect of what is being criticized while ignoring the real substance of the reproach, does not count as a response to THIS reproach. For example, if "{keyword}" is accused of favouring one interest group but only speaks in the article about an unrelated procedural question, or if an office only expresses regret that an internal report was leaked without addressing what that report actually found, that does not count.
+This link also runs in BOTH directions between a department/office and the person the article identifies as having headed or led it at the time described: if "{keyword}" is that person, a statement from that department/office counts as a response from "{keyword}"; if "{keyword}" is that department/office, a statement from the person identified as its head, given in that capacity, counts as a response from "{keyword}" -- even if the specific quoted sentence does not repeat the link itself, as long as the article establishes that headship relationship somewhere in the text. For example, if the article identifies "{keyword}" as heading a named department, a statement from that department addressing criticism directed at "{keyword}" counts; conversely, if "{keyword}" is that department, a statement from the person the article identifies as its head, speaking in that capacity, counts for "{keyword}" too.
+
+A statement from a DIFFERENT party that reacts to, rebuts, or argues against "{keyword}" does not count as "{keyword}" responding, no matter how closely it addresses the same episode or how much it discredits the criticism -- the response must come from "{keyword}" itself or from someone authorized to speak for it, as defined above, not from another party arguing back on the same affair from the opposite side. For example, if "{keyword}" is criticised by one body and a different body dismisses or pushes back against that specific criticism, that pushback is not "{keyword}" responding to it, even though it concerns the exact same disagreement.
+
+The statement you count must address the SAME reproach you are evaluating here, not a different criticism, a different topic, or only one narrow part of a broader accusation while leaving its actual substance untouched. "{keyword}" (or the article) covering other matters elsewhere in the piece, or reacting to only a side aspect of what is being criticized while ignoring the real substance of the reproach, does not count as a response to THIS reproach. For example, if "{keyword}" is accused of favouring one interest group but only speaks in the article about an unrelated procedural question, or if an office only expresses regret that an internal report was leaked without addressing what that report actually found, that does not count; and if "{keyword}" is accused, by name, of favouring one interest group through clientelism, but the article only shows "{keyword}" defending a completely different, separately-named proposal or decision, that defense does not count either, even if it is forcefully argued.
+
+"Same reproach" means the same underlying decision or situation, not the same words or the same angle: if "{keyword}" (or whoever is authorized to speak for it) explains or defends that SAME decision on grounds different from the ones the critics themselves raised, that still counts. For example, if a measure is criticized for ignoring one set of concerns (say, its effect on a stated goal) and "{keyword}" explains the reversal by citing an entirely different concern (say, the measure's effect on employees), that still counts as a response to the criticism of that same reversal -- it is one decision being explained on its own terms, not a different topic.
 
 Do not count a response as present just because "{keyword}" is quoted or mentioned elsewhere on an unrelated matter, because another party unconnected to it comments on the criticism, or because the article merely reports that "{keyword}" took some action, changed course, or came under pressure, without "{keyword}" (or its spokesperson) actually saying anything about it.
 

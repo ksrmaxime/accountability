@@ -32,6 +32,17 @@ set -eo pipefail
 # (src/step4a_pass2_coherence_logit_prompts.py) is SHARED, unchanged,
 # regardless of backend.
 #
+# 2026-11-24 addition: pass "1.5" (pass1 coherence check, logit-probing,
+# src/step4a_pass1_coherence_logit_prompts.py) -- see
+# scripts/step4a_source_attribution.py's own module docstring for the full
+# diagnosis/rationale. Runs BEFORE pass 2, directly on
+# source_attribution_draft. This pass is gated STRICTLY to --backend
+# litellm inside the script itself (it is a no-op for
+# sbatch_step4a_array.sh's GPU/vllm/transformers path regardless of any
+# flag here), so this sbatch file needs no conditional for that -- the
+# PASS1_COHERENCE_*/SKIP_PASS1_COHERENCE knobs below only ever take effect
+# on this remote run.
+#
 # API key: read from a .env file at the repo root (UNIL_LITELLM_API_KEY=...)
 # -- see sbatch_step3_remote_test.sh's header comment for the full
 # .env/gitignore convention, unchanged here.
@@ -87,6 +98,17 @@ TEMPERATURE=0.0
 DRAFT_MAX_RETRIES=2
 RETRY_TEMPERATURE=0.4
 
+# Pass "1.5" ("pass1 coherence check", logit-probing, 2026-11-24) --
+# --backend litellm ONLY, see src/step4a_pass1_coherence_logit_prompts.py
+# and scripts/step4a_source_attribution.py's own module docstring. Runs
+# BEFORE pass 2 below, directly on source_attribution_draft.
+PASS1_COHERENCE_CANDIDATE_LETTERS=A,B
+PASS1_COHERENCE_BATCH_SIZE=32
+PASS1_COHERENCE_CHECKPOINT_EVERY=200
+PASS1_COHERENCE_THRESHOLD=${PASS1_COHERENCE_THRESHOLD:-0.5}
+PASS1_COHERENCE_MARGIN=${PASS1_COHERENCE_MARGIN:-0.15}
+SKIP_PASS1_COHERENCE=${SKIP_PASS1_COHERENCE:-0}
+
 # Pass 2 ("forced re-search") -- same as the GPU run.
 VERIFY_BATCH_SIZE=8
 VERIFY_MAX_NEW_TOKENS=250
@@ -130,8 +152,14 @@ echo "INPUT=${INPUT} | OUTPUT_BASE=${OUTPUT_BASE} | TEXT_COL=${TEXT_COL} | N_ROW
 echo "BACKEND=${BACKEND} | MODEL_PATH=${MODEL_PATH} | API_BASE=${API_BASE} | CONCURRENCY=${CONCURRENCY}"
 echo "BATCH=${BATCH_SIZE} | MAX_NEW_TOKENS=${MAX_NEW_TOKENS} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | TEMP=${TEMPERATURE}"
 echo "DRAFT_MAX_RETRIES=${DRAFT_MAX_RETRIES} | RETRY_TEMPERATURE=${RETRY_TEMPERATURE}"
+echo "PASS1_COHERENCE_CANDIDATE_LETTERS=${PASS1_COHERENCE_CANDIDATE_LETTERS} | PASS1_COHERENCE_BATCH_SIZE=${PASS1_COHERENCE_BATCH_SIZE} | PASS1_COHERENCE_CHECKPOINT_EVERY=${PASS1_COHERENCE_CHECKPOINT_EVERY} | PASS1_COHERENCE_THRESHOLD=${PASS1_COHERENCE_THRESHOLD} | PASS1_COHERENCE_MARGIN=${PASS1_COHERENCE_MARGIN} | SKIP_PASS1_COHERENCE=${SKIP_PASS1_COHERENCE}"
 echo "VERIFY_BATCH=${VERIFY_BATCH_SIZE} | VERIFY_MAX_NEW_TOKENS=${VERIFY_MAX_NEW_TOKENS} | VERIFY_MAX_INPUT_TOKENS=${VERIFY_MAX_INPUT_TOKENS} | VERIFY_TEMP=${VERIFY_TEMPERATURE} | SKIP_PASS2=${SKIP_PASS2}"
 echo "COHERENCE_CANDIDATE_LETTERS=${COHERENCE_CANDIDATE_LETTERS} | COHERENCE_BATCH_SIZE=${COHERENCE_BATCH_SIZE} | COHERENCE_CHECKPOINT_EVERY=${COHERENCE_CHECKPOINT_EVERY} | COHERENCE_THRESHOLD=${COHERENCE_THRESHOLD} | COHERENCE_MARGIN=${COHERENCE_MARGIN} | SKIP_COHERENCE=${SKIP_COHERENCE}"
+
+SKIP_PASS1_COHERENCE_FLAG=()
+if [[ "${SKIP_PASS1_COHERENCE}" == "1" ]]; then
+    SKIP_PASS1_COHERENCE_FLAG=(--skip_pass1_coherence)
+fi
 
 SKIP_PASS2_FLAG=()
 if [[ "${SKIP_PASS2}" == "1" ]]; then
@@ -163,6 +191,11 @@ python scripts/step4a_source_attribution.py \
   --verify_max_new_tokens   "$VERIFY_MAX_NEW_TOKENS" \
   --verify_max_input_tokens "$VERIFY_MAX_INPUT_TOKENS" \
   --verify_temperature      "$VERIFY_TEMPERATURE" \
+  --pass1_coherence_candidate_letters   "$PASS1_COHERENCE_CANDIDATE_LETTERS" \
+  --pass1_coherence_batch_size          "$PASS1_COHERENCE_BATCH_SIZE" \
+  --pass1_coherence_checkpoint_every    "$PASS1_COHERENCE_CHECKPOINT_EVERY" \
+  --pass1_coherence_threshold           "$PASS1_COHERENCE_THRESHOLD" \
+  --pass1_coherence_margin              "$PASS1_COHERENCE_MARGIN" \
   --coherence_candidate_letters   "$COHERENCE_CANDIDATE_LETTERS" \
   --coherence_batch_size          "$COHERENCE_BATCH_SIZE" \
   --coherence_checkpoint_every    "$COHERENCE_CHECKPOINT_EVERY" \
@@ -170,6 +203,7 @@ python scripts/step4a_source_attribution.py \
   --coherence_margin              "$COHERENCE_MARGIN" \
   --task_id 0 \
   --num_tasks 1 \
+  "${SKIP_PASS1_COHERENCE_FLAG[@]}" \
   "${SKIP_PASS2_FLAG[@]}" \
   "${SKIP_COHERENCE_FLAG[@]}"
 
