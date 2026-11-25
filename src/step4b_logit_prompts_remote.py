@@ -26,6 +26,38 @@ not (yet) to this one. This is intentionally just a safe, isolated
 starting point for later remote-specific tuning, not a tuning pass
 itself.
 
+2026-11-25 "summary reliability" pass -- SUMMARY_TEMPLATE only, nothing
+else in this file touched. Diagnosed by reading all 72 (article, generated
+source_summary) pairs from job21026402's oracle population against the
+final classification outcome: every row with an imperfect summary ended up
+misclassified (15/15), while a faithful summary still left a ~21% residual
+error rate (12/56) attributable to pass 2's probes rather than the summary
+-- so summary quality is a real, separate lever worth pulling on its own.
+Four GENERAL weaknesses recurred across multiple, unrelated articles (not
+single one-off mistakes, so fixed as general principles, not per-case
+patches):
+  1. Inferring/asserting a personal-vs-institutional framing the article
+     itself never actually states (e.g. adding a committee/session context
+     not supported by the text) -- now only stated when the article makes
+     it explicit, "not specified by the article" otherwise.
+  2. Paraphrasing a named, specific actor (a person, a party, an
+     organization) into a vaguer generic description -- now the article's
+     own exact name/party/organization must be kept, never generalised.
+  3. Describing an anonymous or pseudonymous commenter as if they were an
+     identified individual -- now flagged explicitly when the source is
+     not a real identified name.
+  4. Truncation risk (SUMMARY_MAX_NEW_TOKENS is a fixed sbatch budget, see
+     sbatch_step4b_logit_remote_test.sh) cutting off a summary mid-sentence
+     before the decisive fact was written -- mitigated by asking for a
+     tighter, complete answer; raising that sbatch budget is a separate,
+     complementary fix on the launch-script side, not a prompt change.
+A fifth, structural issue (an article with more than one distinct critic
+of the same keyword, for different reasons) is only made VISIBLE by this
+pass (each critic now described separately instead of blended into one),
+not resolved -- which one gold then treats as "the" source for that row is
+a separate, unresolved question this prompt change does not attempt to
+settle.
+
 scripts/step4b_source_category_logit.py picks this module instead of
 src/step4b_logit_prompts.py only when --backend litellm is used; every
 other backend (vllm/transformers) is completely unaffected, byte-for-byte,
@@ -306,18 +338,30 @@ below, "{keyword}" is criticized.
 ARTICLE:
 {article_text}
 
-Summarize, in 2 to 4 sentences:
+Summarize, in 2 to 4 short, complete sentences (a few more only if point 4 below applies and \
+more than one distinct critic must be described separately):
 1. What exactly "{keyword}" is being criticized for.
 2. Who or what is making this criticism -- name the specific actor, institution, or \
-organization if the article identifies one (never "{keyword}" itself, which is only the \
-target, never the source, of the criticism).
-3. If a named individual is speaking, make clear whether they are speaking personally / in \
-their own political capacity, or explicitly in the name of their institution or \
-organization -- this distinction matters more than their job title.
+organization EXACTLY as the article identifies them (the precise person's name, party, \
+office, or organization -- never a vaguer paraphrase or generalisation of it, and never \
+"{keyword}" itself, which is only the target, never the source, of the criticism). If the \
+source is not identified by a real name -- an anonymous commenter, a pseudonym, an unnamed \
+"reader" or "expert" -- say so explicitly instead of describing them as if they were an \
+identified individual.
+3. Whether this actor is speaking personally / in their own capacity, or explicitly in the \
+name of an institution or organization -- this distinction matters more than their job \
+title. State this ONLY when the article itself makes it clear either way; if the article \
+does not say, write that it is not specified rather than inferring or assuming one or the \
+other.
+4. If the article presents more than one distinct actor independently criticizing \
+"{keyword}" for separate reasons, describe each one on its own (following points 1-3 for \
+each) instead of merging them into a single blended description.
 
 Do NOT classify the source into a category yourself -- just describe who they are and what \
 they said, as factually and specifically as possible. If the article does not clearly name \
-who is criticizing "{keyword}", say so explicitly rather than guessing.\
+who is criticizing "{keyword}", say so explicitly rather than guessing. Keep the answer \
+tight and self-contained -- a short, complete answer is better than a longer one that risks \
+being cut off before it is finished.\
 """
 
 
