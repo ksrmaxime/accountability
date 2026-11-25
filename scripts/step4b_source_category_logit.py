@@ -70,6 +70,36 @@ aggregation loop) rather than a 3rd fresh guess. An inconclusive pass-3
 read (GPU OOM etc.) is fail-safe: pass 2's own choice is kept, not swapped
 on a signal that isn't trusted.
 
+2026-11-25 "p0 floor" fix -- --backend litellm ONLY. Diagnosed from comparing
+two real job logs: job20620441 (local 8B, --backend transformers) printed
+p0 well spread across categories (Administrative Unit 0.2344, Politician
+0.4537, Interest Group 0.3689, Civil Servant 0.3641, General Public 0.2227,
+Other 0.7877), while job21022122 (--backend litellm, Apertus-v1.5-70B)
+printed p0 = 0.0000 for ALL SIX categories on the exact same calibration
+design (the "N/A" empty-summary variant). The 70B is simply far more
+confidently negative than the 8B on content-free input. The consequence:
+src/step4b_logit_utils.calibrate(p, p0) = sigmoid(logit(p) - logit(p0)), so
+a p0 this close to 0 makes logit(p0) an extreme negative number and the
+correction pushes almost ANY non-negligible raw p (0.1 or 0.9, genuinely
+different signals) up to ~1.0 alike -- destroying the probe's ability to
+tell a moderate reading from a strong one. This is the direct, confirmed
+cause of the Administrative Unit / Politician (and Interest Group / General
+Public) ties-at-ceiling found in job21022503's confusion-matrix analysis.
+Fix: _floor_p0_litellm() clips every p0[cat] (and p0_val[cat] for pass 3)
+into [0.05, 0.95] right after compute_calibration()/compute_validation_
+calibration() return, before calibrate() ever sees them -- gated strictly
+behind args.backend == "litellm" below. src/step4b_logit_utils.py's
+calibrate() function itself is NOT modified (it is shared, backend-
+agnostic, used by every step); the production 8B/local-GPU path calls it
+exactly as before, with unfloored p0, byte-for-byte unaffected. The 0.05
+floor sits comfortably below the 8B's own historical p0 range (0.22-0.79),
+so even if this floor were ever accidentally exercised on an 8B-like p0 it
+would not change anything -- it only clamps the pathological near-0 (or
+near-1) case the 70B produces. This keeps the exact same logit-probing
+architecture and the exact same calibration formula requested by the user
+-- nothing about the method changes, only a numerical-stability clip on one
+of its inputs.
+
 Output columns:
   source_summary                     -> the pre-pass's factual summary of
                                           the criticism and its source (free
@@ -175,6 +205,26 @@ SUMMARY_TEXT_COL = "source_summary"
 
 def _slug(category: str) -> str:
     return category.lower().replace(" ", "_")
+
+
+# 2026-11-25 "p0 floor" fix -- --backend litellm ONLY, see this module's
+# docstring changelog entry above for the full diagnosis and justification.
+_LITELLM_P0_FLOOR = 0.05
+
+
+def _floor_p0_litellm(p0: dict) -> dict:
+    """--backend litellm ONLY. Clips every p0[cat] into
+    [_LITELLM_P0_FLOOR, 1 - _LITELLM_P0_FLOOR] before it is ever handed to
+    src/step4b_logit_utils.calibrate(), so a near-0 (or near-1) empty-prompt
+    reading from a very confident model can no longer blow up calibrate()'s
+    logit-space correction term. calibrate() itself is NOT touched -- this
+    only pre-clips one of its two inputs, and only on this call path. A
+    genuine NaN (failed calibration read) is passed through unchanged, not
+    floored, so it is still correctly treated as missing downstream."""
+    floored = {}
+    for cat, v in p0.items():
+        floored[cat] = v if pd.isna(v) else min(max(v, _LITELLM_P0_FLOOR), 1.0 - _LITELLM_P0_FLOOR)
+    return floored
 
 
 PROB_COLS = [f"source_category_p_{_slug(c)}" for c in CATEGORIES]
@@ -546,8 +596,20 @@ def main() -> int:
     print("[calibration] Computing p0(category) on the empty-summary variant...", flush=True)
     p0 = compute_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
                               build_calibration_prompt_fn=active_build_calibration_prompt)
-    for cat in CATEGORIES:
-        print(f"  p0[{cat}] = {p0[cat]:.4f}")
+    if args.backend == "litellm":
+        # 2026-11-25 "p0 floor" fix -- see module docstring. Local 8B path
+        # (the else-branch that never runs this) is completely unaffected.
+        p0_raw = dict(p0)
+        p0 = _floor_p0_litellm(p0)
+        for cat in CATEGORIES:
+            if pd.notna(p0_raw[cat]) and abs(p0[cat] - p0_raw[cat]) > 1e-9:
+                print(f"  p0[{cat}] = {p0_raw[cat]:.4f} -> floored to {p0[cat]:.4f} "
+                      f"(2026-11-25 p0-floor fix, --backend litellm only)")
+            else:
+                print(f"  p0[{cat}] = {p0[cat]:.4f}")
+    else:
+        for cat in CATEGORIES:
+            print(f"  p0[{cat}] = {p0[cat]:.4f}")
 
     # --- Build the flat list of (row_idx, category, order) prompts for
     # every row with a usable summary. Reads source_summary, NOT the raw
@@ -686,8 +748,20 @@ def main() -> int:
         print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
         p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
                                                  build_validation_calibration_prompt_fn=active_build_validation_calibration_prompt)
-        for cat in CATEGORIES:
-            print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
+        if args.backend == "litellm":
+            # 2026-11-25 "p0 floor" fix -- see module docstring. Local 8B path
+            # (the else-branch that never runs this) is completely unaffected.
+            p0_val_raw = dict(p0_val)
+            p0_val = _floor_p0_litellm(p0_val)
+            for cat in CATEGORIES:
+                if pd.notna(p0_val_raw[cat]) and abs(p0_val[cat] - p0_val_raw[cat]) > 1e-9:
+                    print(f"  p0_val[{cat}] = {p0_val_raw[cat]:.4f} -> floored to {p0_val[cat]:.4f} "
+                          f"(2026-11-25 p0-floor fix, --backend litellm only)")
+                else:
+                    print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
+        else:
+            for cat in CATEGORIES:
+                print(f"  p0_val[{cat}] = {p0_val[cat]:.4f}")
 
         val_flat_keys = []    # (row_idx, order)
         val_flat_prompts = []
