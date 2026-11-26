@@ -46,9 +46,22 @@ set -eo pipefail
 # Auto-chain: this script's own result is handed straight to
 # sbatch_step5_remote_test.sh at the end (see the bottom of this file) --
 # same re-creation of the classic pipeline's merge-script auto-chain
-# (sbatch_merge_step4b_logit.sh's own `sbatch sbatch_step5_array.sh ...`
-# line), just without the array/merge indirection since this is already a
-# single job producing a single output file.
+# (sbatch_merge_step4b_logit.sh's own `sbatch sbatch_step5_array.sh
+# ${MERGED_PARQUET}` line), just without the array/merge indirection since
+# this is already a single job producing a single output file.
+#
+# 2026-11-26 -- added the optional head-to-head "disambiguation" pass
+# (src/step4b_logit_prompts_remote.py / scripts/step4b_source_category_logit.py,
+# litellm-only, see those files' own changelogs). It is OFF by default
+# (threshold 0.0): this script takes no positional flags, only the two
+# positional args documented below, so the new pass is controlled the same
+# way CONCURRENCY/SKIP_VALIDATION already are -- via an environment
+# variable set BEFORE the `sbatch` call, e.g.:
+#   DISAMBIGUATION_MARGIN_THRESHOLD=0.15 sbatch sbatch_step4b_logit_remote_test.sh
+# Passing `--disambiguation_margin_threshold 0.15` directly to `sbatch` does
+# NOT work and will break the run -- sbatch has no flag parsing here, so
+# that string is consumed as $1 (INPUT), silently replacing the real input
+# path and causing the python script to fail trying to read it as a file.
 #
 # Usage:
 #   sbatch sbatch_step4b_logit_remote_test.sh [<input>] [<model>]
@@ -101,6 +114,14 @@ VALIDATION_BATCH_SIZE=32
 VALIDATION_CHECKPOINT_EVERY=200
 SKIP_VALIDATION=${SKIP_VALIDATION:-1}
 
+# Pass 3bis ("disambiguation", head-to-head logit-probing between pass 2's
+# top-2 categories) -- litellm-only, added 2026-11-26. OFF by default
+# (threshold 0.0, i.e. no row's margin is ever < 0.0). Override via env var,
+# e.g. DISAMBIGUATION_MARGIN_THRESHOLD=0.15 sbatch sbatch_step4b_logit_remote_test.sh
+DISAMBIGUATION_MARGIN_THRESHOLD=${DISAMBIGUATION_MARGIN_THRESHOLD:-0.0}
+DISAMBIGUATION_BATCH_SIZE=${DISAMBIGUATION_BATCH_SIZE:-32}
+DISAMBIGUATION_CHECKPOINT_EVERY=${DISAMBIGUATION_CHECKPOINT_EVERY:-200}
+
 # =============================================================================
 
 export OMP_NUM_THREADS=1
@@ -128,6 +149,7 @@ echo "BACKEND=${BACKEND} | MODEL_PATH=${MODEL_PATH} | API_BASE=${API_BASE} | CON
 echo "SUMMARY_BATCH_SIZE=${SUMMARY_BATCH_SIZE} | SUMMARY_TEMPERATURE=${SUMMARY_TEMPERATURE} | SUMMARY_MAX_NEW_TOKENS=${SUMMARY_MAX_NEW_TOKENS} | SUMMARY_CHECKPOINT_EVERY=${SUMMARY_CHECKPOINT_EVERY}"
 echo "BATCH_SIZE=${BATCH_SIZE} | MAX_INPUT_TOKENS=${MAX_INPUT_TOKENS} | CANDIDATE_LETTERS=${CANDIDATE_LETTERS}"
 echo "VALIDATION_BATCH_SIZE=${VALIDATION_BATCH_SIZE} | VALIDATION_CHECKPOINT_EVERY=${VALIDATION_CHECKPOINT_EVERY} | SKIP_VALIDATION=${SKIP_VALIDATION}"
+echo "DISAMBIGUATION_MARGIN_THRESHOLD=${DISAMBIGUATION_MARGIN_THRESHOLD} | DISAMBIGUATION_BATCH_SIZE=${DISAMBIGUATION_BATCH_SIZE} | DISAMBIGUATION_CHECKPOINT_EVERY=${DISAMBIGUATION_CHECKPOINT_EVERY}"
 
 SKIP_VALIDATION_FLAG=()
 if [[ "${SKIP_VALIDATION}" == "1" ]]; then
@@ -154,6 +176,9 @@ python scripts/step4b_source_category_logit.py \
   --checkpoint_every          "$CHECKPOINT_EVERY" \
   --validation_batch_size     "$VALIDATION_BATCH_SIZE" \
   --validation_checkpoint_every "$VALIDATION_CHECKPOINT_EVERY" \
+  --disambiguation_margin_threshold "$DISAMBIGUATION_MARGIN_THRESHOLD" \
+  --disambiguation_batch_size        "$DISAMBIGUATION_BATCH_SIZE" \
+  --disambiguation_checkpoint_every  "$DISAMBIGUATION_CHECKPOINT_EVERY" \
   --task_id 0 \
   --num_tasks 1 \
   "${SKIP_VALIDATION_FLAG[@]}"
