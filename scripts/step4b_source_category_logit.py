@@ -100,6 +100,64 @@ architecture and the exact same calibration formula requested by the user
 -- nothing about the method changes, only a numerical-stability clip on one
 of its inputs.
 
+2026-11-26 checkpoint-resume fix -- --backend litellm ONLY. job21084261's
+source_category_p_civil_servant came back null for ALL 97 SOURCED rows
+(the other five categories each had at most a handful of scattered nulls,
+0-5/97 -- ordinary occasional per-row logit-read misses). An all-rows
+failure, identical regardless of row content, pointed at the ONE-TIME
+compute_calibration() call for that category rather than anything per-row
+(p0[cat] is NaN -> every row's corrected[cat] is forced to NaN a few lines
+below, see the aggregation loop). The immediate cause was most likely
+src/step4b_logit_prompts_remote.py's Civil Servant definition containing
+an embedded question mark right before the template's own real "Question:"
+section (now rewritten as a declarative sentence -- see that file's own
+2026-11-26c changelog entry), but investigating this surfaced a separate,
+real robustness gap worth closing regardless of whether that was the exact
+trigger: the per-row logit checkpoint (logit_checkpoint_path) and the
+pass-3 validation checkpoint (validation_checkpoint_path) only persist
+across runs when a run is killed or crashes before reaching the cleanup
+at the end of main() (SLURM time limit, a dropped network connection,
+etc.) -- on a clean run they are always deleted (see the end of main()).
+When one DOES persist and a later run resumes from it, the resume loop
+only checked "is this key present in the checkpoint", never "is the value
+in the checkpoint actually usable" -- a (row, category, order) entry whose
+every candidate-letter logit came back NaN (a transient read failure that
+exhausted its retries, see src/client_remote.py's _post_with_retry) would
+be loaded into `done`/`val_done` exactly like a real, successful read, and
+therefore never retried, however many times the script is resumed
+afterwards. Fixed by discarding (not loading) any checkpoint row whose
+logits are NaN for every candidate letter, so it falls back into
+`todo_indices`/`val_todo` and gets a fresh attempt -- see the two
+`[resume]` blocks below. Gated strictly behind args.backend == "litellm":
+the local 8B/GPU path's resume behaviour is completely unaffected, byte-
+for-byte, exactly like every other litellm-only fix in this file.
+
+2026-11-26 disambiguation pass addition -- --backend litellm ONLY, Maxime's
+idea. job21084261's confusion matrix (post the "clean rewrite" prompt
+redesign, see src/step4b_logit_prompts_remote.py's 2026-11-26 changelog
+entry) still showed several near-zero-margin errors between Administrative
+Unit of the State and Politician (Froidevaux/DDPS-VBS, the Chavannes-pres-
+Renens Syndic, the Finanzdelegation) where BOTH categories' absolute
+definitions plausibly apply to the same elected/appointed executive member
+-- a case pass 2's six INDEPENDENT yes/no probes, and pass 3's single
+true/false re-read, have no way to force a choice on, because neither ever
+asks "which of these two is the better fit" directly. Adds a new pass,
+gated by --disambiguation_margin_threshold (0.0 default = disabled; margins
+are never negative, so no row ever qualifies at the default): for every row
+whose pass-2 (or pass-3-adjusted) margin falls below this threshold, ask
+ONE direct head-to-head question naming pass 2's own winner and runner-up
+explicitly side by side -- see
+src/step4b_logit_prompts_remote.py's DISAMBIGUATION_QUESTION_TEMPLATE for
+the full rationale and why it is a different question in kind from pass 3,
+not a repeat of it. Same logit-probing machinery as pass 2/3 (one forward
+pass, order-swap averaging) but calibrated per (cat1, cat2) PAIR, computed
+lazily -- once per unique pair actually encountered among the selected
+rows, not all 15 possible pairs up front. An inconclusive read is
+fail-safe, same precedent as pass 3: the row's current choice is kept,
+never swapped on an untrusted signal. No local-GPU equivalent exists (the
+production src/step4b_logit_prompts.py is never touched), so main() raises
+if this is requested with any backend other than litellm.
+
 Output columns:
   source_summary                     -> the pre-pass's factual summary of
                                           the criticism and its source (free
@@ -125,8 +183,26 @@ Output columns:
                                           runner-up (a confidence signal
                                           this design gives "for free")
   source_category_incomplete         -> "TRUE" if the summary pre-pass, ANY
-                                          pass-2 logit read, OR the pass-3
-                                          validation read failed, else NA
+                                          pass-2 logit read, the pass-3
+                                          validation read, OR the
+                                          disambiguation read failed, else NA
+  source_category_disambiguation_applied   -> "TRUE" if this row's pass-2
+                                          margin was below
+                                          --disambiguation_margin_threshold
+                                          and it went through the head-to-
+                                          head disambiguation pass, else NA
+                                          (--backend litellm only; see that
+                                          flag's own help text)
+  source_category_before_disambiguation    -> the category this row held
+                                          right before the disambiguation
+                                          pass ran (pass 2's own choice, or
+                                          pass 3's if that swapped it) --
+                                          only set when applied is "TRUE"
+  source_category_disambiguation_p_original -> the disambiguation pass's
+                                          calibrated P(the ORIGINAL -- pre-
+                                          disambiguation -- choice is the
+                                          better fit); NA if inconclusive
+                                          (kept, not swapped) or not applied
 
 Usage
 -----
@@ -185,6 +261,13 @@ from src.step4b_logit_prompts_remote import (
     build_summary_prompt as build_summary_prompt_remote,
     build_validation_prompt as build_validation_prompt_remote,
     build_validation_calibration_prompt as build_validation_calibration_prompt_remote,
+    # 2026-11-26: disambiguation pass, --backend litellm ONLY -- no local-GPU
+    # equivalent exists (src/step4b_logit_prompts.py is never touched), so
+    # these are referenced directly inside the backend=="litellm" branch
+    # below, with no "active_*" indirection and no fallback to a production
+    # builder, unlike the five imports above.
+    build_disambiguation_prompt as build_disambiguation_prompt_remote,
+    build_disambiguation_calibration_prompt as build_disambiguation_calibration_prompt_remote,
 )
 from src.step4b_logit_utils import (
     softmax_restricted,
@@ -238,6 +321,11 @@ ALL_OUTPUT_COLS = (
         "source_category_validation_p_true",
         "source_category_validated",
         "source_category_incomplete",
+        # 2026-11-26 disambiguation pass (--backend litellm only, opt-in via
+        # --disambiguation_margin_threshold) -- see the module docstring.
+        "source_category_disambiguation_applied",
+        "source_category_before_disambiguation",
+        "source_category_disambiguation_p_original",
     ]
     + PROB_COLS
 )
@@ -416,6 +504,27 @@ def main() -> int:
                     "Kept as a flag rather than deleting pass 3's code, in case a future fix (summary "
                     "quality, full-article re-read, etc.) makes it worth re-enabling.")
 
+    # --- Disambiguation pass (2026-11-26, --backend litellm ONLY, opt-in):
+    # one direct head-to-head question between pass 2's own top-2 categories,
+    # for rows whose pass-2 margin is below the threshold below. See the
+    # module docstring's 2026-11-26 "disambiguation pass addition" entry and
+    # src/step4b_logit_prompts_remote.py's DISAMBIGUATION_QUESTION_TEMPLATE
+    # module comment for the full rationale. batch_size/checkpoint_every
+    # mirror pass 3's own (count (row, order) prompts, 2 per disambiguated
+    # row). ---
+    ap.add_argument("--disambiguation_margin_threshold", type=float, default=0.0,
+                    help="Run the head-to-head disambiguation pass on every row whose pass-2 "
+                         "winning margin is below this value -- a genuine toss-up between its "
+                         "top two categories, not noise. 0.0 (the default) disables this pass "
+                         "entirely: margins are never negative, so no row ever qualifies. Pass "
+                         "a positive value (e.g. 0.15) to opt in. --backend litellm ONLY -- "
+                         "raises if used with --backend vllm/transformers, since there is no "
+                         "local-GPU prompt builder for this (src/step4b_logit_prompts.py is "
+                         "never touched).")
+    ap.add_argument("--disambiguation_batch_size", type=int, default=32)
+    ap.add_argument("--disambiguation_checkpoint_every", type=int, default=200,
+                    help="Save a checkpoint after every N (row,order) disambiguation prompts resolved.")
+
     # --- Internal ---
     ap.add_argument("--job_id",    default=None)
     ap.add_argument("--task_id",   type=int, default=None,
@@ -427,6 +536,12 @@ def main() -> int:
     candidate_letters = [s.strip() for s in args.candidate_letters.split(",") if s.strip()]
     if len(candidate_letters) != 2:
         raise ValueError(f"--candidate_letters must give exactly 2 letters, got {candidate_letters!r}")
+    if args.disambiguation_margin_threshold > 0 and args.backend != "litellm":
+        raise ValueError(
+            "--disambiguation_margin_threshold > 0 is only supported with --backend litellm "
+            "-- no local-GPU prompt builder exists for this pass, and src/step4b_logit_prompts.py "
+            "(the production 8B/local-GPU path) is never touched."
+        )
 
     # 2026-11-24: pick the prompt module for the summary pre-pass, pass 2's
     # question prompts, and pass 3's validation prompts based on --backend --
@@ -482,9 +597,10 @@ def main() -> int:
     print(f"[pipeline] {len(df):,} rows in chunk — {len(eligible_idx_all):,} SOURCED rows "
           f"eligible for the summary pre-pass (rest keep source_category = NA)")
 
-    summary_checkpoint_path    = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_summary_checkpoint.parquet"
-    logit_checkpoint_path      = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_checkpoint.parquet"
-    validation_checkpoint_path = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_validation_checkpoint.parquet"
+    summary_checkpoint_path        = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_summary_checkpoint.parquet"
+    logit_checkpoint_path          = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_checkpoint.parquet"
+    validation_checkpoint_path     = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_validation_checkpoint.parquet"
+    disambiguation_checkpoint_path = args.output_base + (f"_task{task_id}" if task_id is not None else "") + "_disambiguation_checkpoint.parquet"
 
     for col in ALL_OUTPUT_COLS:
         if col not in df.columns:
@@ -634,10 +750,22 @@ def main() -> int:
     done = {}  # (row_idx, cat, order) -> {letter: logit}
     if Path(logit_checkpoint_path).exists():
         ckpt = pd.read_parquet(logit_checkpoint_path)
+        n_skipped_nan = 0
         for _, r in ckpt.iterrows():
             key = (int(r["row_idx"]), str(r["category"]), int(r["order"]))
-            done[key] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
-        print(f"[resume] Loaded {len(done):,} already-resolved prompts from {logit_checkpoint_path}", flush=True)
+            logits_dict = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+            if args.backend == "litellm" and all(pd.isna(v) for v in logits_dict.values()):
+                # 2026-11-26 checkpoint-resume fix -- see module docstring.
+                # A previously-failed read (every candidate letter's logit
+                # NaN) must never be treated as "done": discard it here so it
+                # falls back into todo_indices and gets retried. litellm-only
+                # -- the local 8B path's resume behaviour is unaffected.
+                n_skipped_nan += 1
+                continue
+            done[key] = logits_dict
+        print(f"[resume] Loaded {len(done):,} already-resolved prompts from {logit_checkpoint_path}"
+              + (f" ({n_skipped_nan:,} previously-failed all-NaN entries discarded, will retry)"
+                 if n_skipped_nan else ""), flush=True)
 
     todo_indices = [i for i, key in enumerate(flat_keys) if key not in done]
     print(f"[pipeline] {len(todo_indices):,} prompts remaining to compute "
@@ -780,11 +908,20 @@ def main() -> int:
         val_done = {}  # (row_idx, order) -> {letter: logit}
         if Path(validation_checkpoint_path).exists():
             ckpt = pd.read_parquet(validation_checkpoint_path)
+            n_skipped_nan = 0
             for _, r in ckpt.iterrows():
                 vkey = (int(r["row_idx"]), int(r["order"]))
-                val_done[vkey] = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+                logits_dict = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+                if args.backend == "litellm" and all(pd.isna(v) for v in logits_dict.values()):
+                    # 2026-11-26 checkpoint-resume fix -- see module docstring
+                    # and the matching pass-2 resume block above.
+                    n_skipped_nan += 1
+                    continue
+                val_done[vkey] = logits_dict
             print(f"[resume] Loaded {len(val_done):,} already-resolved validation prompts from "
-                  f"{validation_checkpoint_path}", flush=True)
+                  f"{validation_checkpoint_path}"
+                  + (f" ({n_skipped_nan:,} previously-failed all-NaN entries discarded, will retry)"
+                     if n_skipped_nan else ""), flush=True)
 
         val_todo = [i for i, vkey in enumerate(val_flat_keys) if vkey not in val_done]
         print(f"[validation] {len(val_todo):,} validation prompts remaining "
@@ -864,6 +1001,188 @@ def main() -> int:
               f"({n_val_incomplete:,} validation reads inconclusive, pass 2's choice kept as-is)",
               flush=True)
 
+    # ---------------------------------------------------------------------
+    # Disambiguation pass (2026-11-26, --backend litellm ONLY, opt-in via
+    # --disambiguation_margin_threshold > 0, Maxime's idea): for every
+    # resolved row whose CURRENT margin (pass 2's own, or pass 3's if that
+    # ran and swapped it) is below the threshold -- a genuine toss-up, not
+    # noise -- ask ONE direct head-to-head question naming its top two
+    # categories explicitly, instead of trusting six independent absolute
+    # reads in isolation. See the module docstring's 2026-11-26
+    # "disambiguation pass addition" entry and
+    # src/step4b_logit_prompts_remote.py's DISAMBIGUATION_QUESTION_TEMPLATE
+    # module comment for the full rationale and how this differs from pass
+    # 3 above. An inconclusive read is fail-safe, same precedent as pass 3:
+    # the row's current choice is kept, never swapped on an untrusted
+    # signal.
+    # ---------------------------------------------------------------------
+    if args.backend == "litellm" and args.disambiguation_margin_threshold > 0:
+        disamb_idx = [
+            i for i in eligible_idx
+            if pd.notna(df.at[i, "source_category"])
+            and pd.notna(df.at[i, "source_category_runnerup"])
+            and pd.notna(df.at[i, "source_category_margin"])
+            and float(df.at[i, "source_category_margin"]) < args.disambiguation_margin_threshold
+        ]
+        print(f"[disambiguation] {len(disamb_idx):,}/{len(eligible_idx):,} resolved rows have a "
+              f"margin below {args.disambiguation_margin_threshold} -- re-checking these with a "
+              f"direct head-to-head question...", flush=True)
+
+        # Each row's own (cat1, cat2) pair -- cat1/cat2 = the row's own
+        # current winner/runner-up. Canonicalised to a SORTED tuple purely
+        # for calibration caching (so (X, Y) and (Y, X) share one
+        # calibration), independent of which one is actually "ahead" for
+        # any given row.
+        row_pair = {}
+        for i in disamb_idx:
+            cat_a = df.at[i, "source_category"]
+            cat_b = df.at[i, "source_category_runnerup"]
+            row_pair[i] = tuple(sorted((cat_a, cat_b)))
+
+        unique_pairs = sorted(set(row_pair.values()))
+        print(f"[disambiguation] {len(unique_pairs):,} unique category pair(s) among these rows", flush=True)
+
+        # --- Lazy, once-per-pair calibration on the empty-summary variant
+        # -- only the pairs that actually occur, never all 15 possible
+        # pairs up front. ---
+        p0_pairs = {}
+        if unique_pairs:
+            calib_prompts, calib_meta = [], []  # meta: (pair, order)
+            for pair in unique_pairs:
+                for order in (1, 2):
+                    calib_prompts.append(
+                        build_disambiguation_calibration_prompt_remote(pair[0], pair[1], order, context_label=SUMMARY_CONTEXT_LABEL)
+                    )
+                    calib_meta.append((pair, order))
+            print(f"[disambiguation] Computing p0(pair) on the empty-summary variant "
+                  f"({len(calib_prompts):,} forward passes)...", flush=True)
+            calib_raw = client.logprob_many(
+                system_prompt="",
+                user_prompts=calib_prompts,
+                candidate_letters=candidate_letters,
+                max_input_tokens=args.max_input_tokens,
+            )
+            p_cat1_by_pair_order = {}
+            for (pair, order), logits_dict in zip(calib_meta, calib_raw):
+                probs = softmax_restricted(logits_dict)
+                letter_cat1, _letter_cat2 = letters_for_order(order)
+                p_cat1_by_pair_order[(pair, order)] = probs.get(letter_cat1, float("nan"))
+            for pair in unique_pairs:
+                p0_pairs[pair] = average_yes_over_orderings(
+                    p_cat1_by_pair_order[(pair, 1)], p_cat1_by_pair_order[(pair, 2)]
+                )
+                print(f"  p0[{pair[0]} vs {pair[1]}] = {p0_pairs[pair]:.4f}", flush=True)
+
+        # --- Flat (row_idx, order) prompts, one per disambiguated row x 2 orders. ---
+        dis_flat_keys = []    # (row_idx, order)
+        dis_flat_prompts = []
+        for i in disamb_idx:
+            pair = row_pair[i]
+            row = df.loc[i]
+            for order in (1, 2):
+                dis_flat_keys.append((i, order))
+                dis_flat_prompts.append(
+                    build_disambiguation_prompt_remote(row, SUMMARY_TEXT_COL, pair[0], pair[1], order, context_label=SUMMARY_CONTEXT_LABEL)
+                )
+
+        print(f"[disambiguation] {len(dis_flat_prompts):,} total (row, order) prompts "
+              f"({len(disamb_idx):,} rows x 2 orders)", flush=True)
+
+        dis_done = {}  # (row_idx, order) -> {letter: logit}
+        if Path(disambiguation_checkpoint_path).exists():
+            ckpt = pd.read_parquet(disambiguation_checkpoint_path)
+            n_skipped_nan = 0
+            for _, r in ckpt.iterrows():
+                dkey = (int(r["row_idx"]), int(r["order"]))
+                logits_dict = {letter: r[f"logit_{letter}"] for letter in candidate_letters}
+                if all(pd.isna(v) for v in logits_dict.values()):
+                    # 2026-11-26 checkpoint-resume fix -- see module
+                    # docstring and the matching pass-2/pass-3 resume blocks
+                    # above (this pass is litellm-only already, so no extra
+                    # backend check is needed here).
+                    n_skipped_nan += 1
+                    continue
+                dis_done[dkey] = logits_dict
+            print(f"[resume] Loaded {len(dis_done):,} already-resolved disambiguation prompts from "
+                  f"{disambiguation_checkpoint_path}"
+                  + (f" ({n_skipped_nan:,} previously-failed all-NaN entries discarded, will retry)"
+                     if n_skipped_nan else ""), flush=True)
+
+        dis_todo = [i for i, dkey in enumerate(dis_flat_keys) if dkey not in dis_done]
+        print(f"[disambiguation] {len(dis_todo):,} prompts remaining "
+              f"({len(dis_flat_prompts) - len(dis_todo):,} already done)", flush=True)
+
+        n_since_dis_checkpoint = 0
+        for start in range(0, len(dis_todo), args.disambiguation_batch_size):
+            batch_flat_idx = dis_todo[start:start + args.disambiguation_batch_size]
+            batch_prompts = [dis_flat_prompts[i] for i in batch_flat_idx]
+
+            raw = client.logprob_many(
+                system_prompt="",
+                user_prompts=batch_prompts,
+                candidate_letters=candidate_letters,
+                max_input_tokens=args.max_input_tokens,
+            )
+            for flat_idx, logits_dict in zip(batch_flat_idx, raw):
+                dis_done[dis_flat_keys[flat_idx]] = logits_dict
+
+            n_since_dis_checkpoint += len(batch_flat_idx)
+            n_done_total = len(dis_flat_prompts) - (len(dis_todo) - start - len(batch_flat_idx))
+            print(f"[disambiguation progress] {n_done_total:,}/{len(dis_flat_prompts):,} prompts resolved", flush=True)
+
+            if n_since_dis_checkpoint >= args.disambiguation_checkpoint_every:
+                _save_validation_checkpoint(disambiguation_checkpoint_path, dis_done, candidate_letters)
+                n_since_dis_checkpoint = 0
+
+        if dis_todo:
+            _save_validation_checkpoint(disambiguation_checkpoint_path, dis_done, candidate_letters)
+
+        n_swapped = 0
+        n_dis_incomplete = 0
+        for i in disamb_idx:
+            pair = row_pair[i]
+            original_cat = df.at[i, "source_category"]
+            p_cat1_by_order = {}
+            dis_any_nan = False
+            for order in (1, 2):
+                logits_dict = dis_done.get((i, order))
+                if logits_dict is None:
+                    p_cat1_by_order[order] = float("nan")
+                    dis_any_nan = True
+                    continue
+                probs = softmax_restricted(logits_dict)
+                letter_cat1, _letter_cat2 = letters_for_order(order)
+                p_cat1_by_order[order] = probs.get(letter_cat1, float("nan"))
+                if pd.isna(p_cat1_by_order[order]):
+                    dis_any_nan = True
+
+            p_cat1 = average_yes_over_orderings(p_cat1_by_order[1], p_cat1_by_order[2])
+            if pd.isna(p_cat1) or pd.isna(p0_pairs.get(pair)):
+                dis_any_nan = True
+
+            df.at[i, "source_category_disambiguation_applied"] = "TRUE"
+            df.at[i, "source_category_before_disambiguation"] = original_cat
+
+            if dis_any_nan:
+                # Inconclusive read -- fail-safe: keep the current choice,
+                # don't swap on a signal we don't trust (same precedent as
+                # pass 3 above).
+                n_dis_incomplete += 1
+                df.at[i, "source_category_incomplete"] = "TRUE"
+                continue
+
+            p_cat1_corrected = calibrate(p_cat1, p0_pairs[pair])
+            winner = pair[0] if p_cat1_corrected >= 0.5 else pair[1]
+            p_original = p_cat1_corrected if original_cat == pair[0] else (1.0 - p_cat1_corrected)
+            df.at[i, "source_category_disambiguation_p_original"] = p_original
+
+            if winner != original_cat:
+                df.at[i, "source_category"] = winner
+                n_swapped += 1
+
+        print(f"[disambiguation] {n_swapped:,}/{len(disamb_idx):,} rows swapped by the head-to-head "
+              f"pass ({n_dis_incomplete:,} reads inconclusive, original choice kept)", flush=True)
+
     n_incomplete = int((df["source_category_incomplete"] == "TRUE").sum())
     if n_incomplete > n_incomplete_pass2:
         print(f"[warning] {n_incomplete:,} rows flagged source_category_incomplete in total "
@@ -892,12 +1211,20 @@ def main() -> int:
     na_count = int(df["source_category"].isna().sum())
     avg_margin = df["source_category_margin"].dropna().astype(float).mean() if df["source_category_margin"].notna().any() else float("nan")
     n_validated_false = int((df["source_category_validated"] == "FALSE").sum())
+    n_disambiguated = int((df["source_category_disambiguation_applied"] == "TRUE").sum())
+    n_disambiguation_swapped = int((
+        (df["source_category_disambiguation_applied"] == "TRUE")
+        & df["source_category_before_disambiguation"].notna()
+        & (df["source_category"] != df["source_category_before_disambiguation"])
+    ).sum()) if n_disambiguated else 0
     print(f"Saved: {parquet_path} | {len(df):,} rows total | NA: {na_count:,} | "
           f"incomplete: {n_incomplete:,} | avg winning margin (pass 2): {avg_margin:.4f} | "
-          f"pass-3 rejections (swapped to runner-up): {n_validated_false:,}")
+          f"pass-3 rejections (swapped to runner-up): {n_validated_false:,} | "
+          f"disambiguation: {n_disambiguation_swapped:,}/{n_disambiguated:,} rows swapped")
     print(counts.to_string())
 
-    for p in (summary_checkpoint_path, logit_checkpoint_path, validation_checkpoint_path):
+    for p in (summary_checkpoint_path, logit_checkpoint_path, validation_checkpoint_path,
+              disambiguation_checkpoint_path):
         if Path(p).exists():
             Path(p).unlink()
             print(f"[checkpoint] Deleted {p}")

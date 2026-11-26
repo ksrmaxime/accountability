@@ -133,6 +133,57 @@ order machinery, and every build_*/letters_for_order function are
 UNCHANGED -- this is a wording-only rewrite of the pre-pass prompt and the
 six category definitions/examples, nothing structural.
 
+2026-11-26b: job21084261 (the first run under the clean rewrite above)
+reached 66.7% accuracy (48/72), the best of the whole series so far (vs
+62.0% pre-rewrite with the p0 floor alone, 50.7% on the regressed
+2026-11-25 pass) -- see the orchestration script's analysis notes. Its
+confusion matrix showed a real, if smaller, residual confusion between
+'Politician' and 'Interest Group' -- Maxime's diagnosis: a political party
+is, in the everyday sense of the term, itself a group representing a
+particular interest, so the two definitions above didn't clearly enough
+rule a party OUT of 'Interest Group'. Two concrete misses matched this
+exactly: a party ("the Greens") and a named "SVP faction president" both
+pulled a confident (margin 0.52 and 0.80) 'Interest Group' prediction
+instead of 'Politician' -- "faction" likely reading, to the model, like
+"an organized association" rather than "the party's own members in
+parliament". Both CATEGORY_DEFINITION entries now say explicitly, and
+symmetrically (each category's definition is shown to the model in
+isolation -- see QUESTION_TEMPLATE -- so a rule needed by both sides can't
+just live in one of them), that a party/faction is Politician, never
+Interest Group, regardless of how interest-driven its position is.
+CANONICAL_EXAMPLES unchanged.
+
+2026-11-26c: job21084261 ALSO showed source_category_p_civil_servant as
+null for ALL 97 SOURCED rows (not just the 4 gold-labelled ones Maxime
+asked about) -- categorically different from the other five categories,
+which each had at most a handful of scattered nulls (0-5/97, ordinary
+occasional per-row logit-read misses). An all-97 failure, with nothing
+category-specific about which rows failed, points at the ONE-TIME
+calibration call for this category (compute_calibration runs once per
+category, not per row -- see scripts/step4b_source_category_logit.py) --
+if THAT single call fails to read a clean A/B logit, p0['Civil Servant']
+is NaN and the per-row aggregation loop then nulls out every row's
+Civil Servant probability regardless of how the real per-row reads went
+(pd.isna(p0[cat]) short-circuits to NaN). Checking the CATEGORY_DEFINITION
+text itself for anything that singles Civil Servant out: it was the ONLY
+one of the six containing an embedded question mark ("...-> Civil
+Servant)? A retired..."), sitting unusually close to the template's own
+real "Question:" section below it -- on the calibration prompt's
+content-free "N/A" variant, where there is nothing else for the model to
+anchor on, this is a plausible trigger for an off-format first token that
+breaks the A/B logit read. Rewritten as a declarative sentence instead
+(still states the exact same test), purely to remove this one structural
+oddity -- this is a plausible, not confirmed, mechanism (no cluster shell
+access to inspect the actual failed API calls), but it is a safe,
+strictly-improving change either way: no other category's definition uses
+an embedded question, so this just brings Civil Servant in line with the
+other five. Maxime separately clears the stale, non-job-specific
+checkpoint file (OUTPUT_BASE has no job id, so
+.../step4b_logit_remote_task0_checkpoint.parquet is reused/extended
+across every test-script run) before the next run, since the resume logic
+has no way to tell a cached NaN apart from a cached real value and would
+otherwise keep reusing this failure forever regardless of any prompt fix.
+
 scripts/step4b_source_category_logit.py picks this module instead of
 src/step4b_logit_prompts.py only when --backend litellm is used; every
 other backend (vllm/transformers) is completely unaffected, byte-for-byte,
@@ -180,8 +231,14 @@ CATEGORY_DEFINITION = {
         "official party statement both count equally here -- there is no need to "
         "determine whether the politician is speaking personally or on behalf of their "
         "party; either way, this is Politician. Often signalled by a party name or "
-        "abbreviation given in parentheses right after the person's name. A FORMER "
-        "politician commenting on "
+        "abbreviation given in parentheses right after the person's name. A "
+        "parliamentary group or faction (the party's own elected members sitting "
+        "together in parliament) IS the party itself here, not a separate "
+        "organization -- someone named by a role within it (e.g. 'party leader' or "
+        "'faction president') is still Politician, even though a political party is, "
+        "in the everyday sense, itself a group representing a particular interest: in "
+        "THIS taxonomy a party is never 'Interest Group', which is reserved for "
+        "non-political organizations instead. A FORMER politician commenting on "
         "public affairs still qualifies -- their political identity does not disappear "
         "on retirement. Restricted to SWISS political office-holders and parties: a "
         "foreign politician or party does not qualify here (see 'Other'). Excludes "
@@ -189,28 +246,38 @@ CATEGORY_DEFINITION = {
         "government policy (see 'Interest Group')."
     ),
     "Interest Group": (
-        "The source is an organized, non-state, non-political entity -- a private "
-        "company, a business or professional association, a union, an NGO, a lobby "
-        "group, a think tank, a media outlet, or an organized advocacy/protest group, "
-        "even an informal one, as long as it acts as a collective. This category makes "
-        "NO distinction between the entity itself making a statement and an individual "
-        "explicitly speaking for it: a company's owner or CEO personally criticizing a "
-        "regulation that affects his business is still Interest Group, exactly as if "
-        "the company itself had issued the statement, because he is speaking as the "
-        "person in charge of that entity. There is no need to determine whether the "
-        "entity itself or a specific individual representing it is speaking -- both "
-        "count equally as Interest Group."
+        "The source is an organized, non-political entity representing a particular, "
+        "non-state interest -- a private company, a business or professional "
+        "association, a union, an NGO, a lobby group, a think tank, a media outlet, or "
+        "an organized advocacy/protest group, even an informal one, as long as it acts "
+        "as a collective. IMPORTANT: a political party is, in the everyday sense of the "
+        "term, also a group representing a particular interest -- but in this taxonomy "
+        "it is NEVER Interest Group. Any Swiss political party, and anyone speaking as "
+        "part of one (including a parliamentary group/faction, which is simply that "
+        "party's own elected members, and anyone named by a role within it, e.g. 'party "
+        "leader' or 'faction president'), is 'Politician' instead, however partisan or "
+        "interest-driven the statement is -- Interest Group is reserved for NON-"
+        "political organizations: companies, business/trade bodies, unions, NGOs, and "
+        "the like. This category also makes NO distinction between the entity itself "
+        "making a statement and an individual explicitly speaking for it: a company's "
+        "owner or CEO personally criticizing a regulation that affects his business is "
+        "still Interest Group, exactly as if the company itself had issued the "
+        "statement, because he is speaking as the person in charge of that entity. "
+        "There is no need to determine whether the entity itself or a specific "
+        "individual representing it is speaking -- both count equally as Interest "
+        "Group."
     ),
     "Civil Servant": (
         "The source is an individual currently employed by the state -- an official, "
         "auditor, diplomat, police officer, postal worker, etc. -- giving their own "
         "personal account or opinion, with NO administrative unit's name attached to "
         "the statement as its authority. The test against 'Administrative Unit of the "
-        "State' is exactly that: is the statement backed by the name of the office, "
-        "department, or agency the person belongs to (-> Administrative Unit of the "
-        "State), or is the person just speaking for themselves, with no institutional "
-        "name invoked (-> Civil Servant)? A retired or former state employee with no "
-        "current state role does not qualify here (see 'General Public')."
+        "State' is exactly that: when the statement is backed by the name of the "
+        "office, department, or agency the person belongs to, it is Administrative "
+        "Unit of the State instead; when the person is just speaking for themselves, "
+        "with no institutional name invoked, it is Civil Servant. A retired or former "
+        "state employee with no current state role does not qualify here (see "
+        "'General Public')."
     ),
     "General Public": (
         "The source is an ordinary individual speaking only for themselves -- "
@@ -572,3 +639,118 @@ def build_validation_calibration_prompt(
     (not per row), how often THIS validation question's wording defaults
     to True independent of any real content."""
     return _build_validation_prompt(claimed_category, CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order, context_label=context_label)
+
+
+# ---------------------------------------------------------------------------
+# Disambiguation pass (2026-11-26, Maxime's idea, --backend litellm only):
+# for rows where pass 2's own winning margin is very small -- a genuine
+# toss-up between its top two categories, not noise (see
+# scripts/step4b_source_category_logit.py's margin-by-correctness
+# diagnostics: correct rows had a 0.55 median margin in job21084261, wrong
+# rows 0.03 -- a clean separation that makes "low margin" a reliable
+# trigger) -- ask ONE direct, head-to-head question naming BOTH candidates
+# explicitly, instead of trusting six independent absolute yes/no reads in
+# isolation.
+#
+# Different in kind from pass 3 above (validate-and-correct, currently
+# disabled for litellm via --skip_validation): pass 3 asks "is pass 2's
+# own choice true or false?", one category at a time, against its own
+# definition alone -- exactly the frame that let Froidevaux (DDPS/VBS),
+# the Chavannes-pres-Renens Syndic, and the Finanzdelegation (job21084261)
+# slip past pass 2 with a near-zero margin: each one plausibly satisfies
+# BOTH Administrative Unit of the State's and Politician's definitions in
+# isolation, so neither a single absolute yes/no read nor a single
+# true/false re-read has anything to force a choice between the two. This
+# question does: it names both candidates side by side and asks which one
+# fits BETTER, a comparison those cases cannot sidestep.
+#
+# Same logit-probing machinery as pass 2/3 -- one forward pass, order-swap
+# averaging (letters_for_order's existing (yes,no) pair reused verbatim:
+# "cat1" plays "yes"'s role, "cat2" plays "no"'s role, so the exact same
+# letter-swap bias cancellation applies unchanged) -- but calibrated PER
+# (cat1, cat2) PAIR rather than per category, computed lazily: only for
+# pairs that actually occur among the rows selected this run, once each
+# (scripts/step4b_source_category_logit.py caches this per job). Each
+# category's own FIRST canonical example only is shown (not both + 5
+# contrastive ones like pass 2/3): this question already names and defines
+# the two real candidates directly, so the long contrastive-examples block
+# that helps pass 2 rule out five OTHER categories has no role to play
+# here. An inconclusive read is fail-safe, same precedent as pass 3: the
+# row's current choice is kept, never swapped on a signal that isn't
+# trusted.
+# ---------------------------------------------------------------------------
+
+DISAMBIGUATION_QUESTION_TEMPLATE = """\
+You are a media analysis assistant specialised in Swiss public affairs. In the {context_label} \
+below, "{keyword}" is criticized.
+
+{context_label}:
+{article_text}
+
+A prior automated analysis found this to be a genuinely close call between two possible \
+categories for the source of this criticism:
+
+CATEGORY {letter_cat1}: {category_phrase_cat1}
+Definition: {category_definition_cat1}
+Example: {example_cat1}
+
+CATEGORY {letter_cat2}: {category_phrase_cat2}
+Definition: {category_definition_cat2}
+Example: {example_cat2}
+
+Question: based on the {context_label} above, which of these two categories better describes \
+the actual source of the criticism of "{keyword}"?
+Answer with exactly one letter and nothing else:
+{letter_cat1} = {category_phrase_cat1}
+{letter_cat2} = {category_phrase_cat2}\
+"""
+
+
+def _build_disambiguation_prompt(
+    cat1: str, cat2: str, keyword: str, article_text: str, order: int,
+    context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """order=1 -> A=cat1/B=cat2 ; order=2 -> A=cat2/B=cat1 (letters_for_order
+    reused verbatim -- see the module comment above for why this cancels
+    position bias exactly like pass 2/3's own order-swap)."""
+    if order not in (1, 2):
+        raise ValueError(f"order must be 1 or 2, got {order!r}")
+    letter_cat1, letter_cat2 = letters_for_order(order)
+    return DISAMBIGUATION_QUESTION_TEMPLATE.format(
+        keyword=keyword,
+        article_text=article_text,
+        context_label=context_label,
+        category_phrase_cat1=CATEGORY_PHRASE[cat1],
+        category_definition_cat1=CATEGORY_DEFINITION[cat1],
+        example_cat1=CANONICAL_EXAMPLES[cat1][0],
+        category_phrase_cat2=CATEGORY_PHRASE[cat2],
+        category_definition_cat2=CATEGORY_DEFINITION[cat2],
+        example_cat2=CANONICAL_EXAMPLES[cat2][0],
+        letter_cat1=letter_cat1, letter_cat2=letter_cat2,
+    )
+
+
+def build_disambiguation_prompt(
+    row: pd.Series, text_col: str, cat1: str, cat2: str, order: int,
+    context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """The real, row-grounded head-to-head question: the row's own pass-2
+    winner (cat1) against its own runner-up (cat2), for a row whose margin
+    was small enough to flag as a genuine toss-up. The caller reads both
+    off the row's own pass-2 output and passes them in -- this function
+    doesn't look them up itself."""
+    alias = row.get("matched_alias", None)
+    keyword = str(alias if pd.notna(alias) and str(alias).strip() else row.get("keyword", "")).strip()
+    article_text = "" if pd.isna(row[text_col]) else str(row[text_col]).strip()
+    return _build_disambiguation_prompt(cat1, cat2, keyword, article_text, order, context_label=context_label)
+
+
+def build_disambiguation_calibration_prompt(
+    cat1: str, cat2: str, order: int, context_label: str = DEFAULT_CONTEXT_LABEL,
+) -> str:
+    """Same empty-summary neutralisation as build_calibration_prompt /
+    build_validation_calibration_prompt, for this question's own shape --
+    measures, once per (cat1, cat2) pair actually encountered (not per
+    row), how often THIS pair's head-to-head wording defaults to cat1
+    independent of any real content."""
+    return _build_disambiguation_prompt(cat1, cat2, CALIBRATION_KEYWORD, CALIBRATION_ARTICLE, order, context_label=context_label)
