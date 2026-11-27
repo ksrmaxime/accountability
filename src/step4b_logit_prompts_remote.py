@@ -184,6 +184,55 @@ across every test-script run) before the next run, since the resume logic
 has no way to tell a cached NaN apart from a cached real value and would
 otherwise keep reusing this failure forever regardless of any prompt fix.
 
+2026-11-27 "three qualitative fixes" -- CATEGORY_DEFINITION only
+(CANONICAL_EXAMPLES unchanged, same precedent as 2026-11-26b/c), from
+reading job21121556's confusion matrix and every one of its 17 remaining
+errors' source_summary (see that analysis), and Maxime's explicit answers
+to the three questions it raised:
+
+  1. Civil Servant: an unnamed/anonymous source identified only by where
+     they work (e.g. "sources inside Fedpol say...") was being predicted
+     as 'Other' instead (job21121556's fedpol/ceaf826f row) -- Maxime: if
+     they're known to work inside a department and are sharing their own
+     work experience without speaking for the institution, that is
+     clearly Civil Servant, named or not. Added a sentence making this
+     explicit: not being personally named does not change the category,
+     only whether they speak for themselves vs. for the institution does.
+
+  2. Interest Group: a neighbourhood/civic association (job21121556's
+     OFROU-ASTRA/Pia Meier row) was being predicted as 'General Public'
+     instead -- Maxime: yes, that is clearly an Interest Group (an
+     organized, non-political entity), add it to the list. Added
+     "a foundation, or a civic/residents' association (e.g. a
+     neighbourhood association)" to the explicit entity list (both
+     places it appears in this category's definition) -- a GENERAL
+     addition to the category's own scope, not a one-off patch naming
+     this specific association.
+
+  3. Politician vs Interest Group: "the Greens"/"les Verts" criticizing
+     (job21121556's Albert Rosti row) was being predicted as Interest
+     Group -- the 2026-11-26b party-vs-interest-group fix evidently
+     doesn't fire reliably when the party is referred to by a short,
+     topic-sounding nickname rather than its formal name, since nothing
+     in that fix's wording addressed nicknames specifically. Maxime:
+     yes, "les Verts" refers to the Green party, not an ecological
+     interest group -- make that an explicit rule. Added a sentence to
+     BOTH Politician's and Interest Group's definitions (symmetric, same
+     precedent as 2026-11-26b) naming "the Greens"/"les Verts" and a few
+     other common Swiss party nicknames (the Socialists, UDC/SVP, PLR/
+     FDP, Le Centre, Vert'liberaux/pvl) explicitly, as a GENERAL
+     "nickname still means the party" rule rather than special-casing
+     just the Greens.
+
+These three do not touch the recurring Politician/Administrative-Unit-of-
+the-State confusion (job21121556's largest remaining error bucket, 8/17)
+-- that one traces to genuinely structurally ambiguous executive-member
+cases (Froidevaux, the Chavannes-pres-Renens Syndic, the Finanzdelegation)
+and at least one likely GOLD-labelling inconsistency (the Finanzdelegation
+is labelled 'Administrative Unit of the State' in one row and 'Politician'
+in another for what reads as the same kind of source), not a prompt-
+wording gap -- left untouched per Maxime's own read of that analysis.
+
 scripts/step4b_source_category_logit.py picks this module instead of
 src/step4b_logit_prompts.py only when --backend litellm is used; every
 other backend (vllm/transformers) is completely unaffected, byte-for-byte,
@@ -238,7 +287,12 @@ CATEGORY_DEFINITION = {
         "'faction president') is still Politician, even though a political party is, "
         "in the everyday sense, itself a group representing a particular interest: in "
         "THIS taxonomy a party is never 'Interest Group', which is reserved for "
-        "non-political organizations instead. A FORMER politician commenting on "
+        "non-political organizations instead. This also applies when the party is "
+        "named by a short, topic-sounding nickname rather than its full name -- e.g. "
+        "'the Greens'/'les Verts' (the Green party) still means the party itself, "
+        "still Politician, not an ecological Interest Group (see that category's own "
+        "definition for the full list of common Swiss party nicknames this covers). A "
+        "FORMER politician commenting on "
         "public affairs still qualifies -- their political identity does not disappear "
         "on retirement. Restricted to SWISS political office-holders and parties: a "
         "foreign politician or party does not qualify here (see 'Other'). Excludes "
@@ -248,17 +302,28 @@ CATEGORY_DEFINITION = {
     "Interest Group": (
         "The source is an organized, non-political entity representing a particular, "
         "non-state interest -- a private company, a business or professional "
-        "association, a union, an NGO, a lobby group, a think tank, a media outlet, or "
-        "an organized advocacy/protest group, even an informal one, as long as it acts "
-        "as a collective. IMPORTANT: a political party is, in the everyday sense of the "
-        "term, also a group representing a particular interest -- but in this taxonomy "
-        "it is NEVER Interest Group. Any Swiss political party, and anyone speaking as "
-        "part of one (including a parliamentary group/faction, which is simply that "
-        "party's own elected members, and anyone named by a role within it, e.g. 'party "
-        "leader' or 'faction president'), is 'Politician' instead, however partisan or "
-        "interest-driven the statement is -- Interest Group is reserved for NON-"
-        "political organizations: companies, business/trade bodies, unions, NGOs, and "
-        "the like. This category also makes NO distinction between the entity itself "
+        "association, a union, an NGO, a lobby group, a think tank, a media outlet, a "
+        "foundation, or a civic/residents' association (e.g. a neighbourhood "
+        "association), or an organized advocacy/protest group, even an informal one, "
+        "as long as it acts as a collective. IMPORTANT: a political party is, in the "
+        "everyday sense of the term, also a group representing a particular interest "
+        "-- but in this taxonomy it is NEVER Interest Group. Any Swiss political "
+        "party, and anyone speaking as part of one (including a parliamentary group/"
+        "faction, which is simply that party's own elected members, and anyone named "
+        "by a role within it, e.g. 'party leader' or 'faction president'), is "
+        "'Politician' instead, however partisan or interest-driven the statement is "
+        "-- Interest Group is reserved for NON-political organizations: companies, "
+        "business/trade bodies, unions, NGOs, associations, foundations, and the "
+        "like. This includes a party commonly referred to by a short, topic-sounding "
+        "nickname rather than its full name -- e.g. 'the Greens'/'les Verts' (the "
+        "Green party, Switzerland's 'Parti ecologiste suisse'/'Gruene Partei der "
+        "Schweiz'), 'the Socialists'/'les Socialistes' (the Social Democratic Party), "
+        "or similarly for the UDC/SVP, the PLR/FDP, Le Centre, or the Vert'liberaux/"
+        "pvl -- these nicknames still name the political party itself, not a loose "
+        "topic-based interest group, so they are 'Politician' here, never Interest "
+        "Group, even though a name like 'the Greens' sounds like it could describe an "
+        "ecological advocacy group in the abstract. This category also makes NO "
+        "distinction between the entity itself "
         "making a statement and an individual explicitly speaking for it: a company's "
         "owner or CEO personally criticizing a regulation that affects his business is "
         "still Interest Group, exactly as if the company itself had issued the "
@@ -275,9 +340,15 @@ CATEGORY_DEFINITION = {
         "State' is exactly that: when the statement is backed by the name of the "
         "office, department, or agency the person belongs to, it is Administrative "
         "Unit of the State instead; when the person is just speaking for themselves, "
-        "with no institutional name invoked, it is Civil Servant. A retired or former "
-        "state employee with no current state role does not qualify here (see "
-        "'General Public')."
+        "with no institutional name invoked, it is Civil Servant. This also covers an "
+        "unnamed or anonymous individual identified only by where they currently work "
+        "(e.g. 'sources inside Fedpol say...', 'an employee who asked not to be "
+        "named...'), as long as they are reporting their own first-hand experience or "
+        "opinion rather than an official position attributed to the institution "
+        "itself -- not being personally named does not change this: what matters is "
+        "that they speak for themselves about their own experience, not on the "
+        "institution's behalf. A retired or former state employee with no current "
+        "state role does not qualify here (see 'General Public')."
     ),
     "General Public": (
         "The source is an ordinary individual speaking only for themselves -- "
