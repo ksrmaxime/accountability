@@ -158,6 +158,63 @@ never swapped on an untrusted signal. No local-GPU equivalent exists (the
 production src/step4b_logit_prompts.py is never touched), so main() raises
 if this is requested with any backend other than litellm.
 
+2026-11-27 "one-sided top-20" NaN-tolerant averaging fix -- --backend litellm
+ONLY. job21084261 and job21085911 BOTH showed source_category_p_civil_servant
+null for ALL 97 SOURCED rows, with job21085911 confirmed to still fail this
+way AFTER the 2026-11-26c question-mark fix to that category's definition --
+disproving that theory. scripts/diag_step4b_calibration.py (a new standalone,
+hand-run diagnostic, see that file) was used to inspect the model's RAW
+response to each category's real calibration prompt via
+RemoteAPIClient.raw_request(), bypassing logprob_many's silent
+letter-missing->NaN conversion. Finding: the model answers cleanly with a
+single confident letter token every time (no refusal, no reasoning
+preamble, finish_reason="length" as expected for max_tokens=1) -- so there
+is nothing wrong with any prompt's wording. The real cause is structural:
+on the content-free "N/A" calibration input, the model is sometimes SO
+one-sided (e.g. logprob(B) = -0.001 with 'A' not even appearing in the
+returned top_logprobs(20), the OpenAI-spec-capped maximum -- see
+src/client_remote.py's own module docstring, point 2) that ONE of the two
+letter orderings has its "yes" letter fall out of the returned top-20
+window entirely. This is not unique to Civil Servant -- the live diagnostic
+run on 2026-11-27 reproduced it for Interest Group and General Public too,
+at that moment -- but Civil Servant's definition (shortest of the 6, built
+entirely around an exclusion -- "NO administrative unit's name attached")
+seems to trigger the fully-confident-negative response on an empty article
+unusually reliably across repeated runs. Either way, the general bug is in
+how a single missing-letter reading is handled upstream of the model,
+not in any one category's wording: src/step4b_logit_utils.
+average_yes_over_orderings(p1, p2) = 0.5*(p1+p2) is a plain mean, so ONE
+NaN input (letter missing from top-20 -- itself an entirely expected,
+correctly-reported "this probability is near zero" signal, see
+src/client_remote.py's _extract_candidate_logprobs docstring) poisons the
+WHOLE average, even though the OTHER ordering's reading is perfectly
+valid and usable on its own. Downstream, this one-time, per-category p0
+used by EVERY row (compute_calibration/compute_validation_calibration) or
+per-pair p0_pairs used by every disambiguated row sharing that pair
+(compute_calibration's sibling in the disambiguation block below)
+amplifies a single unlucky calibration call into every row for that
+category/pair losing the ability to ever be assigned that category, for
+the whole run -- exactly job21084261/job21085911's symptom. The SAME
+contagious-NaN issue, at smaller scale, also affects any individual row's
+own per-category/per-claim/per-pair reading (compute'd inline in the pass
+2 / pass 3 / disambiguation aggregation loops), contributing to the
+handful of scattered per-row NaNs already seen on other categories.
+Fix: _average_yes_over_orderings_litellm_tolerant() below, used in place
+of the plain src/step4b_logit_utils.average_yes_over_orderings EVERYWHERE
+in this file, gated behind args.backend == "litellm" via the same
+active_build_*-style indirection already used for the prompt builders
+(see active_average_yes_over_orderings below) -- a general fix at the
+averaging step itself, not a per-category wording patch, so it applies
+equally to whichever category or pair happens to hit this on a given run.
+When both orderings are valid, behaviour is byte-identical to the shared
+function (same formula); when exactly one is NaN, uses the other,
+perfectly valid reading alone instead of discarding the whole measurement;
+only when BOTH orderings are NaN (a genuine, total failure) does the
+result stay NaN, same as before. src/step4b_logit_utils.py itself is NOT
+modified (shared, backend-agnostic, used by every step); the production
+8B/local-GPU path keeps calling the plain function exactly as before,
+byte-for-byte unaffected.
+
 Output columns:
   source_summary                     -> the pre-pass's factual summary of
                                           the criticism and its source (free
@@ -310,6 +367,36 @@ def _floor_p0_litellm(p0: dict) -> dict:
     return floored
 
 
+# 2026-11-27 "one-sided top-20" NaN-tolerant averaging fix -- --backend
+# litellm ONLY, see this module's docstring changelog entry above for the
+# full diagnosis (scripts/diag_step4b_calibration.py's findings) and
+# justification.
+def _average_yes_over_orderings_litellm_tolerant(p1: float, p2: float) -> float:
+    """Same intent as src/step4b_logit_utils.average_yes_over_orderings
+    (cancel a model's intrinsic A/B letter preference by averaging both
+    letter-to-meaning orderings), but tolerant of a single missing
+    reading: when the remote server's top_logprobs(20) cap means one
+    ordering's "yes" letter fell out of the returned top-20 (NaN) because
+    the model was ALREADY extremely one-sided on that ordering, use the
+    other, valid ordering's reading alone rather than discarding the
+    measurement entirely via contagious-NaN propagation. If BOTH
+    orderings are NaN (a genuine, total calibration failure), stays NaN,
+    unchanged -- that case is still correctly treated as missing
+    downstream (see compute_calibration/compute_validation_calibration's
+    own docstrings and the pass 2/3/disambiguation aggregation loops).
+    When both inputs ARE valid, this is byte-identical to the shared
+    average_yes_over_orderings (same 0.5*(p1+p2) formula) -- nothing about
+    the calibration math changes, only how a single missing reading is
+    handled."""
+    if pd.notna(p1) and pd.notna(p2):
+        return average_yes_over_orderings(p1, p2)
+    if pd.notna(p1):
+        return p1
+    if pd.notna(p2):
+        return p2
+    return float("nan")
+
+
 PROB_COLS = [f"source_category_p_{_slug(c)}" for c in CATEGORIES]
 ALL_OUTPUT_COLS = (
     [
@@ -341,7 +428,8 @@ def parse_summary_output(raw: str) -> dict:
 
 
 def compute_calibration(client, candidate_letters, max_input_tokens, context_label: str,
-                         build_calibration_prompt_fn=build_calibration_prompt) -> dict:
+                         build_calibration_prompt_fn=build_calibration_prompt,
+                         average_fn=average_yes_over_orderings) -> dict:
     """p0(category): this category's question's own intrinsic yes-bias,
     measured ONCE (order-averaged) on the 'empty' variant of the question
     -- see src/step4b_logit_prompts.build_calibration_prompt. Independent
@@ -353,7 +441,12 @@ def compute_calibration(client, candidate_letters, max_input_tokens, context_lab
     2026-11-24: build_calibration_prompt_fn defaults to the production
     (vllm/transformers) prompt builder, byte-for-byte unaffected; main()
     passes the remote one explicitly when --backend litellm is used -- see
-    the src/step4b_logit_prompts_remote import above."""
+    the src/step4b_logit_prompts_remote import above.
+
+    2026-11-27: average_fn defaults to the shared, backend-agnostic
+    average_yes_over_orderings, byte-for-byte unaffected; main() passes
+    _average_yes_over_orderings_litellm_tolerant explicitly when --backend
+    litellm is used -- see this module's own 2026-11-27 changelog entry."""
     prompts = []
     meta = []  # (category, order)
     for cat in CATEGORIES:
@@ -376,14 +469,15 @@ def compute_calibration(client, candidate_letters, max_input_tokens, context_lab
 
     p0 = {}
     for cat in CATEGORIES:
-        p0[cat] = average_yes_over_orderings(
+        p0[cat] = average_fn(
             p_yes_by_cat_order[(cat, 1)], p_yes_by_cat_order[(cat, 2)]
         )
     return p0
 
 
 def compute_validation_calibration(client, candidate_letters, max_input_tokens, context_label: str,
-                                    build_validation_calibration_prompt_fn=build_validation_calibration_prompt) -> dict:
+                                    build_validation_calibration_prompt_fn=build_validation_calibration_prompt,
+                                    average_fn=average_yes_over_orderings) -> dict:
     """p0_val(claimed_category): pass 3's own question has a different
     shape than pass 2's (one holistic true/false claim instead of 6
     independent yes/no ones), so it gets its own intrinsic yes("true")-
@@ -397,7 +491,12 @@ def compute_validation_calibration(client, candidate_letters, max_input_tokens, 
     production (vllm/transformers) prompt builder, byte-for-byte
     unaffected; main() passes the remote one explicitly when --backend
     litellm is used -- see the src/step4b_logit_prompts_remote import
-    above."""
+    above.
+
+    2026-11-27: average_fn defaults to the shared, backend-agnostic
+    average_yes_over_orderings, byte-for-byte unaffected; main() passes
+    _average_yes_over_orderings_litellm_tolerant explicitly when --backend
+    litellm is used -- see this module's own 2026-11-27 changelog entry."""
     prompts = []
     meta = []  # (claimed_category, order)
     for cat in CATEGORIES:
@@ -420,7 +519,7 @@ def compute_validation_calibration(client, candidate_letters, max_input_tokens, 
 
     p0_val = {}
     for cat in CATEGORIES:
-        p0_val[cat] = average_yes_over_orderings(
+        p0_val[cat] = average_fn(
             p_true_by_cat_order[(cat, 1)], p_true_by_cat_order[(cat, 2)]
         )
     return p0_val
@@ -556,12 +655,16 @@ def main() -> int:
         active_build_calibration_prompt = build_calibration_prompt_remote
         active_build_validation_prompt = build_validation_prompt_remote
         active_build_validation_calibration_prompt = build_validation_calibration_prompt_remote
+        # 2026-11-27 "one-sided top-20" NaN-tolerant averaging fix -- see
+        # this module's own 2026-11-27 changelog entry above.
+        active_average_yes_over_orderings = _average_yes_over_orderings_litellm_tolerant
     else:
         active_build_summary_prompt = build_summary_prompt
         active_build_question_prompt = build_question_prompt
         active_build_calibration_prompt = build_calibration_prompt
         active_build_validation_prompt = build_validation_prompt
         active_build_validation_calibration_prompt = build_validation_calibration_prompt
+        active_average_yes_over_orderings = average_yes_over_orderings
 
     task_id = args.task_id
     if task_id is None and os.environ.get("SLURM_ARRAY_TASK_ID"):
@@ -711,7 +814,8 @@ def main() -> int:
     # except for row-specific content. ---
     print("[calibration] Computing p0(category) on the empty-summary variant...", flush=True)
     p0 = compute_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
-                              build_calibration_prompt_fn=active_build_calibration_prompt)
+                              build_calibration_prompt_fn=active_build_calibration_prompt,
+                              average_fn=active_average_yes_over_orderings)
     if args.backend == "litellm":
         # 2026-11-25 "p0 floor" fix -- see module docstring. Local 8B path
         # (the else-branch that never runs this) is completely unaffected.
@@ -817,7 +921,7 @@ def main() -> int:
                 if pd.isna(p_yes_by_order[order]):
                     any_nan = True
 
-            p = average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
+            p = active_average_yes_over_orderings(p_yes_by_order[1], p_yes_by_order[2])
             if pd.isna(p) or pd.isna(p0[cat]):
                 corrected[cat] = float("nan")
                 any_nan = True
@@ -875,7 +979,8 @@ def main() -> int:
 
         print("[validation] Computing p0_val(claimed category) on the empty-summary variant...", flush=True)
         p0_val = compute_validation_calibration(client, candidate_letters, args.max_input_tokens, context_label=SUMMARY_CONTEXT_LABEL,
-                                                 build_validation_calibration_prompt_fn=active_build_validation_calibration_prompt)
+                                                 build_validation_calibration_prompt_fn=active_build_validation_calibration_prompt,
+                                                 average_fn=active_average_yes_over_orderings)
         if args.backend == "litellm":
             # 2026-11-25 "p0 floor" fix -- see module docstring. Local 8B path
             # (the else-branch that never runs this) is completely unaffected.
@@ -970,7 +1075,7 @@ def main() -> int:
                 if pd.isna(p_true_by_order[order]):
                     val_any_nan = True
 
-            p_true = average_yes_over_orderings(p_true_by_order[1], p_true_by_order[2])
+            p_true = active_average_yes_over_orderings(p_true_by_order[1], p_true_by_order[2])
             if pd.isna(p_true) or pd.isna(p0_val.get(claimed_category)):
                 val_any_nan = True
 
@@ -1068,7 +1173,7 @@ def main() -> int:
                 letter_cat1, _letter_cat2 = letters_for_order(order)
                 p_cat1_by_pair_order[(pair, order)] = probs.get(letter_cat1, float("nan"))
             for pair in unique_pairs:
-                p0_pairs[pair] = average_yes_over_orderings(
+                p0_pairs[pair] = active_average_yes_over_orderings(
                     p_cat1_by_pair_order[(pair, 1)], p_cat1_by_pair_order[(pair, 2)]
                 )
                 print(f"  p0[{pair[0]} vs {pair[1]}] = {p0_pairs[pair]:.4f}", flush=True)
@@ -1156,7 +1261,7 @@ def main() -> int:
                 if pd.isna(p_cat1_by_order[order]):
                     dis_any_nan = True
 
-            p_cat1 = average_yes_over_orderings(p_cat1_by_order[1], p_cat1_by_order[2])
+            p_cat1 = active_average_yes_over_orderings(p_cat1_by_order[1], p_cat1_by_order[2])
             if pd.isna(p_cat1) or pd.isna(p0_pairs.get(pair)):
                 dis_any_nan = True
 
